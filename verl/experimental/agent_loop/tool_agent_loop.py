@@ -56,7 +56,7 @@ class ToolAgentLoop(AgentLoopBase):
         cls.system_prompt = tokenizer.apply_chat_template([{}], add_generation_prompt=False, tokenize=True)
 
     @rollout_trace_op
-    async def run(self, messages: list[dict[str, Any]], sampling_params: dict[str, Any]) -> AgentLoopOutput:
+    async def run(self, messages: list[dict[str, Any]], sampling_params: dict[str, Any], counter) -> AgentLoopOutput:
         metrics = {}
         request_id = uuid4().hex
         prompt_ids = await self.loop.run_in_executor(
@@ -76,6 +76,8 @@ class ToolAgentLoop(AgentLoopBase):
             prompt_ids += response_ids
             response_mask += [1] * len(response_ids)
             assistant_turns += 1
+            
+            current_count = await counter.increment.remote()
 
             # reach max response length
             if len(response_mask) >= self.response_length:
