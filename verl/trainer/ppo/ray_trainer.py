@@ -1273,6 +1273,8 @@ class RayPPOTrainer:
                         with marked_timer("values", timing_raw, color="cyan"):
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
+                            
+                    import pdf; pdf.set_debug(True)
 
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm

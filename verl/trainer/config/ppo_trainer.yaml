@@ -334,3 +334,18 @@ ray_init:
 
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null
+
+
+envs:
+  n_rollouts: 16
+  env_name: babyai
+  task: BabyAI-MixedTrainLocal-v0/goto
+  format_penalty: 0.0
+  binary_reward: False
+  captioner:
+    type: cot
+    max_text_history: 1
+    max_cot_history: 1
+    max_image_history: 0
+  babyai_kwargs:
+    num_dists: 0
