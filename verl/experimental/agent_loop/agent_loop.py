@@ -39,6 +39,33 @@ from verl.workers.rollout.async_server import async_server_class
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+from copy import deepcopy
+
+def combine_outputs(outputs):
+    if not outputs:
+        raise ValueError("outputs list is empty")
+
+    # Start with a copy of the first one
+    combined = deepcopy(outputs[0])
+
+    for out in outputs[1:]:
+        combined.prompt_ids.extend(out.prompt_ids)
+        combined.response_ids.extend(out.response_ids)
+        combined.response_mask.extend(out.response_mask)
+        combined.num_turns += out.num_turns
+        combined.reward += out.reward
+        combined.done = combined.done or out.done  # done if any done is True
+
+        # For metrics: you may want to merge in a custom way
+        # Here we assume metrics has an add/combine method
+        if hasattr(combined.metrics, "combine"):
+            combined.metrics = combined.metrics.combine(out.metrics)
+        else:
+            # fallback: replace or keep list
+            pass
+
+    return combined
+
 @ray.remote
 class Counter:
     def __init__(self):
@@ -302,12 +329,29 @@ class AgentLoopWorker:
         trajectory_info = await get_trajectory_info(
             batch.meta_info.get("global_steps", -1), index, batch.meta_info.get("validate", False)
         )
+        
+        # tasks_num = 32 TODO!
+        agent_names = agent_names[:1]
+        raw_prompts = raw_prompts[:1]
+        trajectory_info = trajectory_info[:1]
+        
+        counter.reset.remote()
 
         for agent_name, messages, trajectory in zip(agent_names, raw_prompts, trajectory_info, strict=True):
             tasks.append(
                 asyncio.create_task(self._run_agent_loop(agent_name, messages.tolist(), sampling_params, trajectory, counter))
             )
         outputs = await asyncio.gather(*tasks)
+        
+        # outputs = [[AgentLoopOutput(), AgentLoopOutput(), ...], [...], ...]
+        # -> new_outputs = [AgentLoopOutput(), AgentLoopOutput(), ...]
+        new_outputs = []
+        for output_list in outputs:
+            for output in output_list:
+                new_outputs.append(output)
+        outputs = new_outputs
+        
+        # outputs = combine_outputs(outputs)
         
         output = self._postprocess(outputs)
         return output
@@ -341,7 +385,7 @@ class AgentLoopWorker:
             output = await agent_loop.run(messages, sampling_params, counter)
             return output
 
-    def _postprocess(self, inputs: list[list[AgentLoopOutput]]) -> DataProto:
+    def _postprocess(self, inputs: list[AgentLoopOutput]) -> DataProto:
         # NOTE: consistent with batch version of generate_sequences in vllm_rollout_spmd.py
         # prompts: left pad
         # responses: right pad
@@ -349,13 +393,13 @@ class AgentLoopWorker:
         # attention_mask: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
         # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
 
-        # convert inputs to list[AgentLoopOutput]
-        new_inputs = []
-        for input_list in inputs:
-            for input_obj in input_list:
-                if len(new_inputs) < len(inputs):
-                    new_inputs.append(input_obj)
-        inputs = new_inputs
+        # # convert inputs to list[AgentLoopOutput]
+        # new_inputs = []
+        # for input_list in inputs:
+        #     for input_obj in input_list:
+        #         if len(new_inputs) < len(inputs):
+        #             new_inputs.append(input_obj)
+        # inputs = new_inputs
 
         # prompts
         self.tokenizer.padding_side = "left"

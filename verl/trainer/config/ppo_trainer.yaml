@@ -337,7 +337,7 @@ ray_init:
 
 
 envs:
-  n_rollouts: 16
+  n_rollouts: 32
   env_name: babyai
   task: BabyAI-MixedTrainLocal-v0/goto
   format_penalty: 0.0

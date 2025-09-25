@@ -111,7 +111,7 @@ class ToolAgentLoop(AgentLoopBase):
                 
             prompt_ids += response_ids
             response_mask += [1] * len(response_ids)
-            # assistant_turns += 1
+            assistant_turns += 1
             
             # # reach max response length
             # if len(response_mask) >= self.response_length:
@@ -155,7 +155,7 @@ class ToolAgentLoop(AgentLoopBase):
 
             # prompt_ids += tool_response_ids
             # response_mask += [0] * len(tool_response_ids)
-            # user_turns += 1
+            user_turns += 1
             
             actions, _ = await self.tool_parser.extract_tool_calls(response_ids)
             messages, reward, terminated, truncated, info = self.env.step(actions)
@@ -173,12 +173,14 @@ class ToolAgentLoop(AgentLoopBase):
                 reward=reward,
                 done=done,
             )
-            output.append(turn_data)
+            # output.append(turn_data) # TODO: should move to here
             
-            threshold = 1024
+            threshold = 256
             current_count = await counter.increment.remote()
             if current_count > threshold:
                 break
+            
+            output.append(turn_data)
             
             prompt_ids = await self.loop.run_in_executor(
                 None,
@@ -187,7 +189,9 @@ class ToolAgentLoop(AgentLoopBase):
                 ),
             )
             response_mask = []
-        
+            
+        # output = combine_outputs(output)
+            
         return output
 
     async def _call_tool(self, tool_call: FunctionCall) -> dict[str, str]:
