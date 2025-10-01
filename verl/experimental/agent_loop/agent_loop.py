@@ -39,6 +39,50 @@ from verl.workers.rollout.async_server import async_server_class
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+from copy import deepcopy
+
+def combine_outputs(outputs):
+    if not outputs:
+        raise ValueError("outputs list is empty")
+
+    # Start with a copy of the first one
+    combined = deepcopy(outputs[0])
+
+    for out in outputs[1:]:
+        combined.prompt_ids.extend(out.prompt_ids)
+        combined.response_ids.extend(out.response_ids)
+        combined.response_mask.extend(out.response_mask)
+        combined.num_turns += out.num_turns
+        combined.reward += out.reward
+        combined.done = combined.done or out.done  # done if any done is True
+
+        # For metrics: you may want to merge in a custom way
+        # Here we assume metrics has an add/combine method
+        if hasattr(combined.metrics, "combine"):
+            combined.metrics = combined.metrics.combine(out.metrics)
+        else:
+            # fallback: replace or keep list
+            pass
+
+    return combined
+
+@ray.remote
+class Counter:
+    def __init__(self):
+        self.num_turns = 0
+
+    def increment(self, n=1):
+        """Increment counter by n."""
+        self.num_turns += n
+        return self.num_turns  # optionally return updated value
+
+    def get(self):
+        """Read current value."""
+        return self.num_turns
+
+    def reset(self):
+        """Reset counter to 0."""
+        self.num_turns = 0
 
 class AsyncLLMServerManager:
     """
@@ -124,7 +168,10 @@ class AgentLoopOutput(BaseModel):
     """Number of chat turns, including user, assistant, tool."""
     metrics: AgentLoopMetrics
     """Auxiliary performance metrics"""
-
+    reward: float = 0.0
+    """Cumulative rewards, for RL agent loop."""
+    done: bool = False
+    """Whether the episode is done, for RL agent loop."""
 
 # make hydra.utils.instantiate happy
 class _DummyConfig:
@@ -234,7 +281,7 @@ class AgentLoopWorker:
             trace_config.get("token2text", False),
         )
 
-    async def generate_sequences(self, batch: DataProto) -> DataProto:
+    async def generate_sequences(self, batch: DataProto, counter: Counter) -> DataProto:
         """Generate sequences from agent loop.
 
         Args:
@@ -282,13 +329,30 @@ class AgentLoopWorker:
         trajectory_info = await get_trajectory_info(
             batch.meta_info.get("global_steps", -1), index, batch.meta_info.get("validate", False)
         )
+        
+        # tasks_num = 32 TODO!
+        agent_names = agent_names[:1]
+        raw_prompts = raw_prompts[:1]
+        trajectory_info = trajectory_info[:1]
+        
+        counter.reset.remote()
 
         for agent_name, messages, trajectory in zip(agent_names, raw_prompts, trajectory_info, strict=True):
             tasks.append(
-                asyncio.create_task(self._run_agent_loop(agent_name, messages.tolist(), sampling_params, trajectory))
+                asyncio.create_task(self._run_agent_loop(agent_name, messages.tolist(), sampling_params, trajectory, counter))
             )
         outputs = await asyncio.gather(*tasks)
-
+        
+        # outputs = [[AgentLoopOutput(), AgentLoopOutput(), ...], [...], ...]
+        # -> new_outputs = [AgentLoopOutput(), AgentLoopOutput(), ...]
+        new_outputs = []
+        for output_list in outputs:
+            for output in output_list:
+                new_outputs.append(output)
+        outputs = new_outputs
+        
+        # outputs = combine_outputs(outputs)
+        
         output = self._postprocess(outputs)
         return output
 
@@ -298,6 +362,7 @@ class AgentLoopWorker:
         messages: list[dict[str, Any]],
         sampling_params: dict[str, Any],
         trajectory: dict[str, Any],
+        counter: Counter,
     ) -> AgentLoopOutput:
         with rollout_trace_attr(
             step=trajectory["step"],
@@ -317,7 +382,7 @@ class AgentLoopWorker:
                 server_manager=self.server_manager,
                 tokenizer=self.tokenizer,
             )
-            output = await agent_loop.run(messages, sampling_params)
+            output = await agent_loop.run(messages, sampling_params, counter)
             return output
 
     def _postprocess(self, inputs: list[AgentLoopOutput]) -> DataProto:
@@ -327,6 +392,14 @@ class AgentLoopWorker:
         # input_ids: prompt + response
         # attention_mask: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
         # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
+
+        # # convert inputs to list[AgentLoopOutput]
+        # new_inputs = []
+        # for input_list in inputs:
+        #     for input_obj in input_list:
+        #         if len(new_inputs) < len(inputs):
+        #             new_inputs.append(input_obj)
+        # inputs = new_inputs
 
         # prompts
         self.tokenizer.padding_side = "left"
@@ -363,10 +436,15 @@ class AgentLoopWorker:
             f"mismatch in response_ids and response_mask shape: {response_ids.shape} vs {response_mask.shape}"
         )
         response_mask = response_mask * response_attention_mask
+        
+        rewards = torch.tensor([input.reward for input in inputs], dtype=torch.float32)
+        dones = torch.tensor([input.done for input in inputs], dtype=torch.bool)
 
         input_ids = torch.cat([prompt_ids, response_ids], dim=1)
         attention_mask = torch.cat([prompt_attention_mask, response_attention_mask], dim=1)
         position_ids = (attention_mask.cumsum(dim=1) - 1) * attention_mask
+        
+        episode_idx = torch.arange(len(inputs), dtype=torch.int32)
 
         batch = TensorDict(
             {
@@ -376,6 +454,9 @@ class AgentLoopWorker:
                 "input_ids": input_ids,  # [bsz, prompt_length + response_length]
                 "attention_mask": attention_mask,  # [bsz, prompt_length + response_length]
                 "position_ids": position_ids,  # [bsz, prompt_length + response_length]
+                "rewards": rewards,  # [bsz]
+                "dones": dones,  # [bsz]
+                "episode_idx": episode_idx,  # [bsz]
             },
             batch_size=len(input_ids),
         )
@@ -420,6 +501,9 @@ class AgentLoopManager:
         self.config = config
         self.worker_group = worker_group
 
+        # In AgentLoopManager.__init__
+        self.counter = Counter.remote()
+        
         self._initialize_llm_servers()
         self._init_agent_loop_workers()
 
@@ -497,7 +581,7 @@ class AgentLoopManager:
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = ray.get(
             [
-                worker.generate_sequences.remote(chunk)
+                worker.generate_sequences.remote(chunk, self.counter)
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )

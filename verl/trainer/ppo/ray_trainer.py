@@ -18,6 +18,7 @@ PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
+import time
 import json
 import os
 import uuid
@@ -1167,12 +1168,28 @@ class RayPPOTrainer:
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
+                        
+                        start = time.time()
                         if not self.async_rollout_mode:
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
                         else:
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
                         timing_raw.update(gen_batch_output.meta_info["timing"])
+                        generation_time = time.time() - start
+                        
+                        gen_batch_output.meta_info["generation_time"] = generation_time
+                        gen_batch_output.meta_info["num_tokens"] = gen_batch_output.batch["response_mask"].sum()
+                        gen_batch_output.meta_info["token_throughput"] = (
+                            gen_batch_output.meta_info["num_tokens"] / generation_time
+                            if generation_time > 0
+                            else -1.0
+                        )
+                        
                         gen_batch_output.meta_info.pop("timing", None)
+                        
+                    token_throughput = gen_batch_output.meta_info["token_throughput"]
+                    if token_throughput > 0:
+                        metrics["system/token_throughput"] = token_throughput.item()
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with marked_timer("gen_max", timing_raw, color="purple"):
@@ -1197,6 +1214,10 @@ class RayPPOTrainer:
                     )
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    
+                    # gen_batch_output keep the first 256 samples: TODO
+                    gen_batch_output = gen_batch_output.slice(0, len(batch.batch))
+                    
                     batch = batch.union(gen_batch_output)
 
                     if "response_mask" not in batch.batch.keys():
@@ -1273,7 +1294,7 @@ class RayPPOTrainer:
                         with marked_timer("values", timing_raw, color="cyan"):
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
-
+                            
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]

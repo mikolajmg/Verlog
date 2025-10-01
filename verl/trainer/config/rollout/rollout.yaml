@@ -168,7 +168,7 @@ calculate_log_probs: False
 agent:
 
   # Number of agent loop workers
-  num_workers: 8
+  num_workers: 32
 
   # custom agent loop config path, which should contain list of configs to intialize AgentLoop instances.
   # https://hydra.cc/docs/advanced/instantiate_objects/overview/
