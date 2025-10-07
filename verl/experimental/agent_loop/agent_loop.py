@@ -68,13 +68,14 @@ def combine_outputs(outputs):
 
 @ray.remote
 class Counter:
-    def __init__(self):
+    def __init__(self, batch_size):
         self.num_turns = 0
+        self.batch_size = batch_size
 
     def increment(self, n=1):
         """Increment counter by n."""
         self.num_turns += n
-        return self.num_turns  # optionally return updated value
+        return self.num_turns >= self.batch_size 
 
     def get(self):
         """Read current value."""
@@ -172,6 +173,8 @@ class AgentLoopOutput(BaseModel):
     """Cumulative rewards, for RL agent loop."""
     done: bool = False
     """Whether the episode is done, for RL agent loop."""
+    env_idx: int = 0 
+    """Index of environment, for multi-env agent loop."""
 
 # make hydra.utils.instantiate happy
 class _DummyConfig:
@@ -337,9 +340,9 @@ class AgentLoopWorker:
         
         counter.reset.remote()
 
-        for agent_name, messages, trajectory in zip(agent_names, raw_prompts, trajectory_info, strict=True):
+        for env_idx, (agent_name, messages, trajectory) in enumerate(zip(agent_names, raw_prompts, trajectory_info, strict=True)):
             tasks.append(
-                asyncio.create_task(self._run_agent_loop(agent_name, messages.tolist(), sampling_params, trajectory, counter))
+                asyncio.create_task(self._run_agent_loop(agent_name, messages.tolist(), sampling_params, trajectory, counter, env_idx))
             )
         outputs = await asyncio.gather(*tasks)
         
@@ -363,6 +366,7 @@ class AgentLoopWorker:
         sampling_params: dict[str, Any],
         trajectory: dict[str, Any],
         counter: Counter,
+        env_idx: int = 0,
     ) -> AgentLoopOutput:
         with rollout_trace_attr(
             step=trajectory["step"],
@@ -382,7 +386,7 @@ class AgentLoopWorker:
                 server_manager=self.server_manager,
                 tokenizer=self.tokenizer,
             )
-            output = await agent_loop.run(messages, sampling_params, counter)
+            output = await agent_loop.run(messages, sampling_params, counter, env_idx)
             return output
 
     def _postprocess(self, inputs: list[AgentLoopOutput]) -> DataProto:
@@ -502,7 +506,7 @@ class AgentLoopManager:
         self.worker_group = worker_group
 
         # In AgentLoopManager.__init__
-        self.counter = Counter.remote()
+        self.counter = Counter.remote(batch_size=config.data.train_batch_size)
         
         self._initialize_llm_servers()
         self._init_agent_loop_workers()

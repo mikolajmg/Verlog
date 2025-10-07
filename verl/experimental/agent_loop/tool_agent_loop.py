@@ -82,7 +82,7 @@ class ToolAgentLoop(AgentLoopBase):
         self.last_msg = None
 
     @rollout_trace_op
-    async def run(self, messages: list[dict[str, Any]], sampling_params: dict[str, Any], counter) -> AgentLoopOutput:
+    async def run(self, messages: list[dict[str, Any]], sampling_params: dict[str, Any], counter, env_idx) -> AgentLoopOutput:
         metrics = {}
         request_id = uuid4().hex
         
@@ -100,7 +100,8 @@ class ToolAgentLoop(AgentLoopBase):
         response_mask = []
         
         output = []
-        user_turns, assistant_turns = 0, 0
+        # user_turns, assistant_turns = 0, 0
+        num_turns = 0
         while True:
                  
             with simple_timer("generate_sequences", metrics):
@@ -111,7 +112,7 @@ class ToolAgentLoop(AgentLoopBase):
                 
             prompt_ids += response_ids
             response_mask += [1] * len(response_ids)
-            assistant_turns += 1
+            # assistant_turns += 1
             
             # # reach max response length
             # if len(response_mask) >= self.response_length:
@@ -155,7 +156,7 @@ class ToolAgentLoop(AgentLoopBase):
 
             # prompt_ids += tool_response_ids
             # response_mask += [0] * len(tool_response_ids)
-            user_turns += 1
+            # user_turns += 1
             
             actions, _ = await self.tool_parser.extract_tool_calls(response_ids)
             messages, reward, terminated, truncated, info = self.env.step(actions)
@@ -168,16 +169,16 @@ class ToolAgentLoop(AgentLoopBase):
                 prompt_ids=prompt_ids,
                 response_ids=response_ids[: self.response_length],
                 response_mask=response_mask[: self.response_length],
-                num_turns=user_turns + assistant_turns + 1,
                 metrics=metrics,
                 reward=reward,
                 done=done,
+                num_turns=num_turns,
+                env_idx=env_idx
             )
             # output.append(turn_data) # TODO: should move to here
             
-            threshold = 256
-            current_count = await counter.increment.remote()
-            if current_count > threshold:
+            is_full = await counter.increment.remote()
+            if is_full:
                 break
             
             output.append(turn_data)
@@ -189,6 +190,8 @@ class ToolAgentLoop(AgentLoopBase):
                 ),
             )
             response_mask = []
+            
+            num_turns += 1
             
         # output = combine_outputs(output)
             
