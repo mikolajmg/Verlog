@@ -197,6 +197,8 @@ def compute_gae_advantage_return(
     response_mask: torch.Tensor,
     gamma: torch.Tensor,
     lam: torch.Tensor,
+    dones: torch.Tensor,
+    episode_structure: list[list[int]],
 ):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
 
@@ -211,6 +213,8 @@ def compute_gae_advantage_return(
             discounted factor used in RL
         lam: `(float)`
             lambda value when computing Generalized Advantage Estimation (https://arxiv.org/abs/1506.02438)
+        dones: `(torch.Tensor)`
+            shape is (bs, response_length). 1 if the token is done (e.g., [EOS]), 0 otherwise.
 
     Returns:
         advantages: `(torch.Tensor)`
@@ -220,8 +224,51 @@ def compute_gae_advantage_return(
 
     """
     with torch.no_grad():
-        nextvalues = 0
-        lastgaelam = 0
+        
+        # turn level
+        turn_values = values[:,0]                   # [B]
+        turn_rewards = token_level_rewards.sum(-1)  # [B]
+
+        turn_advantages = torch.zeros_like(turn_values)
+        turn_returns = torch.zeros_like(turn_values)
+
+        for ep_indices in episode_structure:
+            
+            ep_rewards = turn_rewards[ep_indices]
+            ep_values = turn_values[ep_indices]
+            ep_dones = dones[ep_indices]
+
+            T = len(ep_indices)
+            ep_advantages = torch.zeros_like(ep_values)
+            gae = 0
+
+            for t in reversed(range(T)):
+                if t == T - 1:
+                    ep_advantages[t] = 0.0
+                else:
+                    next_value = ep_values[t + 1]
+                    next_non_terminal = 1.0 - ep_dones[t] * 1.0
+                    delta = ep_rewards[t] + gamma * next_value * next_non_terminal - ep_values[t]
+                    gae = delta + gamma * lam * next_non_terminal * gae
+                    ep_advantages[t] = gae
+
+            ep_returns = ep_advantages + ep_values
+            
+            turn_advantages[ep_indices] = ep_advantages
+            turn_returns[ep_indices] = ep_returns
+        
+        # put turn-level results back to each turn
+        nextvalues = torch.zeros_like(turn_values) # (bs,)
+        lastgaelam = torch.zeros_like(turn_values) # (bs,)
+        for ep_indices in episode_structure:
+            ep_values = turn_values[ep_indices]
+            next_ep_values = torch.cat([ep_values[1:], torch.tensor([ep_values[-1]/gamma], device=ep_values.device)])
+            nextvalues[ep_indices] = next_ep_values
+            ep_gaelam = turn_advantages[ep_indices]
+            next_ep_gaelam = torch.cat([ep_gaelam[1:], torch.zeros_like(ep_gaelam[:1])])
+            lastgaelam[ep_indices] = next_ep_gaelam
+    
+        # token level
         advantages_reversed = []
         gen_len = token_level_rewards.shape[-1]
 

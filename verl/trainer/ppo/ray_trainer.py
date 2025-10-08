@@ -64,6 +64,36 @@ from verl.utils.tracking import ValidationGenerationsLogger
 
 WorkerType = type[Worker]
 
+def reorder_batch_by_episodes(episode_idx, num_turns):
+    """
+    Reorder batch data by episode_idx and num_turns.
+    Returns:
+        reordered_indices: flat list of reordered indices
+        episode_structure: list of episode index groups
+                           [[idx0, idx1, ...], [idxX, ...], ...]
+    """
+    # Create a list of (episode_idx, num_turns, original_index) tuples
+    episode_data = [(ep_idx, turn, i)
+                    for i, (ep_idx, turn) in enumerate(zip(episode_idx, num_turns))]
+
+    # Sort by episode_idx first, then by num_turns
+    episode_data.sort(key=lambda x: (x[0], x[1]))
+
+    # Group by episode_idx
+    episodes = defaultdict(list)
+    for ep_idx, turn, orig_idx in episode_data:
+        episodes[ep_idx].append((turn, orig_idx))
+
+    # Create reordered indices and episode structure
+    episode_structure = []
+    for ep_idx in sorted(episodes.keys()):
+        episode_turns = episodes[ep_idx]
+        # order turns inside each episode
+        episode_turns.sort(key=lambda x: x[0])  
+        episode_indices = [orig_idx for _, orig_idx in episode_turns]
+        episode_structure.append(episode_indices)
+
+    return episode_structure
 
 class Role(Enum):
     """
@@ -244,6 +274,12 @@ def compute_advantage(
         data.batch["response_mask"] = compute_response_mask(data)
     # prepare response group
     if adv_estimator == AdvantageEstimator.GAE:
+        
+        episode_structure = reorder_batch_by_episodes(
+            data.non_tensor_batch["episode_idx"],
+            data.non_tensor_batch["__num_turns__"],
+        )
+        
         # Compute advantages and returns using Generalized Advantage Estimation (GAE)
         advantages, returns = core_algos.compute_gae_advantage_return(
             token_level_rewards=data.batch["token_level_rewards"],
@@ -251,6 +287,8 @@ def compute_advantage(
             response_mask=data.batch["response_mask"],
             gamma=gamma,
             lam=lam,
+            dones=data.batch["dones"],
+            episode_structure=episode_structure,
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -1137,6 +1175,8 @@ class RayPPOTrainer:
                     self._start_profiling(do_profile)
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
+                num_env = self.config.actor_rollout_ref.rollout.agent.num_workers
+                batch = DataProto.concat([batch, batch[-num_env:]])
 
                 # pop those keys for generation
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
@@ -1213,10 +1253,8 @@ class RayPPOTrainer:
                         [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                     )
                     # repeat to align with repeated responses in rollout
+                    assert self.config.actor_rollout_ref.rollout.n == 1, "Only support n=1 for multi-turn PPO training"
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    
-                    # gen_batch_output keep the first 256 samples: TODO
-                    gen_batch_output = gen_batch_output.slice(0, len(batch.batch))
                     
                     batch = batch.union(gen_batch_output)
 
@@ -1296,11 +1334,19 @@ class RayPPOTrainer:
                             batch = batch.union(values)
                             
                     with marked_timer("adv", timing_raw, color="brown"):
-                        # we combine with rule-based rm
-                        reward_extra_infos_dict: dict[str, list]
-                        if self.config.reward_model.launch_reward_fn_async:
-                            reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
-                        batch.batch["token_level_scores"] = reward_tensor
+                        
+                        # # we combine with rule-based rm
+                        # reward_extra_infos_dict: dict[str, list]
+                        # if self.config.reward_model.launch_reward_fn_async:
+                        #     reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+                        # batch.batch["token_level_scores"] = reward_tensor
+                        
+                        batch.batch['token_level_rewards'] = torch.zeros_like(batch.batch['response_mask'], dtype=torch.float64)
+                        seq_len = batch.batch['response_mask'].sum(-1) - 1
+                        indices = torch.arange(batch.batch['response_mask'].shape[0], device=seq_len.device)
+                        reward = batch.batch['rewards'].to(batch.batch['token_level_rewards'].dtype)
+                        batch.batch['token_level_rewards'][indices, seq_len] = reward
+                        batch.batch['token_level_scores'] = batch.batch['token_level_rewards'].clone() 
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
@@ -1329,6 +1375,29 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
+
+                        # remove the last turn in each episode for multi-turn ppo
+                        episode_structure = reorder_batch_by_episodes(
+                            batch.non_tensor_batch["episode_idx"],
+                            batch.non_tensor_batch["__num_turns__"],
+                        )
+                        # Filter out the last turn of each episode (which shouldn't be trained on)
+                        indices_to_keep = []
+                        for episode_indices in episode_structure:
+                            # Keep all turns except the last one in each episode
+                            if len(episode_indices) > 1:
+                                indices_to_keep.extend(episode_indices[:-1])
+                            # If an episode has only one turn, we still need to keep it
+                            # (this might happen in edge cases or single-turn episodes)
+                            else:
+                                indices_to_keep.extend(episode_indices)
+
+                        # Convert to tensor and reorder batch
+                        if len(indices_to_keep) < len(batch.batch):
+                            indices_tensor = torch.tensor(indices_to_keep, dtype=torch.long)
+                            batch = batch.select_idxs(indices_tensor)
+                            print(f"Filtered batch from {len(batch.batch) + len(episode_structure)} to {len(indices_to_keep)} samples "
+                                f"by removing last turn from {len(episode_structure)} episodes")
 
                     # update critic
                     if self.use_critic:
