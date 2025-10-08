@@ -1396,9 +1396,13 @@ class RayPPOTrainer:
                         if len(indices_to_keep) < len(batch.batch):
                             indices_tensor = torch.tensor(indices_to_keep, dtype=torch.long)
                             batch = batch.select_idxs(indices_tensor)
-                            print(f"Filtered batch from {len(batch.batch) + len(episode_structure)} to {len(indices_to_keep)} samples "
-                                f"by removing last turn from {len(episode_structure)} episodes")
 
+                        # # randomly select mini-batch from the whole batch for training
+                        # if self.config.critic.ppo_mini_batch_size > 0:
+                        #     mini_batch_size = min(self.config.critic.ppo_mini_batch_size, len(batch.batch))
+                        #     mini_batch_indices = torch.randperm(len(batch.batch))[:mini_batch_size]
+                        #     batch = batch.select_idxs(mini_batch_indices)
+                            
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):

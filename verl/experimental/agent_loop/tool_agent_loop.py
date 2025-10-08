@@ -18,16 +18,13 @@ import os
 from typing import Any
 from uuid import uuid4
 import numpy as np
+import torch
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
 from verl.tools.utils.tool_registry import initialize_tools_from_config
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
-
-from verl.envs.env import Env
-from verl.envs.environments import make_env
-from verl.envs.captioners import make_captioner
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -60,37 +57,11 @@ class ToolAgentLoop(AgentLoopBase):
         cls.response_length = config.actor_rollout_ref.rollout.response_length
         cls.system_prompt = tokenizer.apply_chat_template([{}], add_generation_prompt=False, tokenize=True)
     
-    def __init__(
-        self, trainer_config, server_manager, tokenizer, **kwargs
-    ):
-        super().__init__(trainer_config, server_manager, tokenizer, **kwargs)
-        
-        def dict_to_namespace(d):
-            """Recursively convert dict to SimpleNamespace for dot-access."""
-            if isinstance(d, dict):
-                return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-            elif isinstance(d, list):
-                return [dict_to_namespace(i) for i in d]
-            else:
-                return d
-            
-        config = dict_to_namespace(trainer_config.config)
-        
-        env = make_env(config.envs.env_name, config.envs.task, config)
-        captioner = make_captioner(config)
-        self.env = Env(config.envs.env_name, config, env, captioner)
-        self.last_msg = None
-
     @rollout_trace_op
-    async def run(self, messages: list[dict[str, Any]], sampling_params: dict[str, Any], counter, env_idx) -> AgentLoopOutput:
+    async def run(self, messages: list[dict[str, Any]], sampling_params: dict[str, Any], env, counter, env_idx) -> AgentLoopOutput:
         metrics = {}
         request_id = uuid4().hex
         
-        if self.last_msg is None:
-            messages, info = self.env.reset()
-        else:
-            messages = self.last_msg
-            
         prompt_ids = await self.loop.run_in_executor(
             None,
             lambda: self.tokenizer.apply_chat_template(
@@ -107,11 +78,15 @@ class ToolAgentLoop(AgentLoopBase):
             with simple_timer("generate_sequences", metrics):
                 
                 response_ids = await self.server_manager.generate(
-                    request_id=request_id, prompt_ids=prompt_ids, sampling_params=sampling_params
+                    request_id=request_id, prompt_ids=prompt_ids, sampling_params=sampling_params, env_idx=env_idx,
                 )
                 
             prompt_ids += response_ids
             response_mask += [1] * len(response_ids)
+            
+            if len(prompt_ids) > 512:
+                print("len(prompt_ids)", len(prompt_ids), len(response_ids))
+            
             # assistant_turns += 1
             
             # # reach max response length
@@ -159,7 +134,7 @@ class ToolAgentLoop(AgentLoopBase):
             # user_turns += 1
             
             actions, _ = await self.tool_parser.extract_tool_calls(response_ids)
-            messages, reward, terminated, truncated, info = self.env.step(actions)
+            messages, reward, terminated, truncated, info = env.step(actions)
             done = np.logical_or(terminated, truncated)
             
             response_ids = prompt_ids[-len(response_mask) :]
@@ -175,12 +150,12 @@ class ToolAgentLoop(AgentLoopBase):
                 num_turns=num_turns,
                 env_idx=env_idx
             )
-            # output.append(turn_data) # TODO: should move to here
+            
+            num_turns += 1
             
             is_full = await counter.increment.remote()
             if is_full:
                 break
-            
             output.append(turn_data)
             
             prompt_ids = await self.loop.run_in_executor(
@@ -191,11 +166,26 @@ class ToolAgentLoop(AgentLoopBase):
             )
             response_mask = []
             
-            num_turns += 1
-            
-        # output = combine_outputs(output)
-            
-        return output
+        prompt_ids = await self.loop.run_in_executor(
+            None,
+            lambda: self.tokenizer.apply_chat_template(
+                messages, tools=self.tool_schemas, add_generation_prompt=True, tokenize=True
+            ),
+        )
+        
+        turn_data = AgentLoopOutput(
+            prompt_ids=prompt_ids,
+            response_ids=[output[-1].response_ids[-1]] if output else [151645],
+            response_mask=[1],
+            metrics=dict(),
+            reward=reward,
+            done=done,
+            num_turns=num_turns,
+            env_idx=env_idx
+        )
+        output.append(turn_data)
+        
+        return output, messages
 
     async def _call_tool(self, tool_call: FunctionCall) -> dict[str, str]:
         """Call tool and return tool response."""

@@ -36,6 +36,10 @@ from verl.utils.fs import copy_to_local
 from verl.utils.rollout_trace import RolloutTraceConfig, rollout_trace_attr, rollout_trace_op
 from verl.workers.rollout.async_server import async_server_class
 
+from verl.envs.env import Env
+from verl.envs.environments import make_env
+from verl.envs.captioners import make_captioner
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
@@ -75,11 +79,7 @@ class Counter:
     def increment(self, n=1):
         """Increment counter by n."""
         self.num_turns += n
-        return self.num_turns >= self.batch_size 
-
-    def get(self):
-        """Read current value."""
-        return self.num_turns
+        return self.num_turns > self.batch_size 
 
     def reset(self):
         """Reset counter to 0."""
@@ -111,13 +111,20 @@ class AsyncLLMServerManager:
         # LRU cache to map request_id to server
         self.request_id_to_server = LRUCache(maxsize=max_cache_size)
 
-    def _choose_server(self, request_id: str) -> ray.actor.ActorHandle:
+    def _choose_server(self, request_id: str, env_idx: int) -> ray.actor.ActorHandle:
         # TODO: implement server pressure awareness load balancing
         if request_id in self.request_id_to_server:
             return self.request_id_to_server[request_id]
-
-        server = self.weighted_serveres[0][1][1]
-        self.weighted_serveres[0][0] += 1
+        
+        # # choose the first server with least requests
+        # server = self.weighted_serveres[0][1][1]
+        # self.weighted_serveres[0][0] += 1
+        
+        # choose all servers with least requests
+        min_requests = self.weighted_serveres[0][0]
+        candidate_servers = [entry for entry in self.weighted_serveres if entry[0] == min_requests]
+        server = candidate_servers[env_idx % len(candidate_servers)][1][1]
+        
         heapq.heapreplace(self.weighted_serveres, self.weighted_serveres[0])
         self.request_id_to_server[request_id] = server
         return server
@@ -129,6 +136,7 @@ class AsyncLLMServerManager:
         *,
         prompt_ids: list[int],
         sampling_params: dict[str, Any],
+        env_idx: int,
     ) -> list[int]:
         """Generate tokens from prompt ids.
 
@@ -140,7 +148,7 @@ class AsyncLLMServerManager:
         Returns:
             List[int]: List of generated token ids.
         """
-        server = self._choose_server(request_id)
+        server = self._choose_server(request_id, env_idx)
         output = await server.generate.remote(
             request_id=request_id,
             prompt_ids=prompt_ids,
@@ -173,7 +181,7 @@ class AgentLoopOutput(BaseModel):
     """Cumulative rewards, for RL agent loop."""
     done: bool = False
     """Whether the episode is done, for RL agent loop."""
-    env_idx: int = 0 
+    env_idx: int = 0
     """Index of environment, for multi-env agent loop."""
 
 # make hydra.utils.instantiate happy
@@ -283,8 +291,25 @@ class AgentLoopWorker:
             trace_config.get("backend"),
             trace_config.get("token2text", False),
         )
+        
+        def dict_to_namespace(d):
+            """Recursively convert dict to SimpleNamespace for dot-access."""
+            if isinstance(d, dict):
+                return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+            elif isinstance(d, list):
+                return [dict_to_namespace(i) for i in d]
+            else:
+                return d
+        config = dict_to_namespace(self.config)
+        
+        print("config.envs.env_name, config.envs.task", config.envs.env_name, config.envs.task)
+        
+        env = make_env(config.envs.env_name, config.envs.task, config)
+        captioner = make_captioner(config)
+        self.env = Env(config.envs.env_name, config, env, captioner)
+        self.last_msg, _ = self.env.reset()
 
-    async def generate_sequences(self, batch: DataProto, counter: Counter) -> DataProto:
+    async def generate_sequences(self, batch: DataProto, counter: Counter, env_idx: int) -> DataProto:
         """Generate sequences from agent loop.
 
         Args:
@@ -333,29 +358,17 @@ class AgentLoopWorker:
             batch.meta_info.get("global_steps", -1), index, batch.meta_info.get("validate", False)
         )
         
-        # tasks_num = 32 TODO!
+        # TODO!
         agent_names = agent_names[:1]
         raw_prompts = raw_prompts[:1]
         trajectory_info = trajectory_info[:1]
-        
-        counter.reset.remote()
-
-        for env_idx, (agent_name, messages, trajectory) in enumerate(zip(agent_names, raw_prompts, trajectory_info, strict=True)):
+        for agent_name, messages, trajectory in zip(agent_names, raw_prompts, trajectory_info, strict=True):
             tasks.append(
-                asyncio.create_task(self._run_agent_loop(agent_name, messages.tolist(), sampling_params, trajectory, counter, env_idx))
+                asyncio.create_task(self._run_agent_loop(agent_name, self.last_msg, sampling_params, trajectory, self.env, counter, env_idx))
             )
         outputs = await asyncio.gather(*tasks)
         
-        # outputs = [[AgentLoopOutput(), AgentLoopOutput(), ...], [...], ...]
-        # -> new_outputs = [AgentLoopOutput(), AgentLoopOutput(), ...]
-        new_outputs = []
-        for output_list in outputs:
-            for output in output_list:
-                new_outputs.append(output)
-        outputs = new_outputs
-        
-        # outputs = combine_outputs(outputs)
-        
+        outputs, self.last_msg = outputs[0]
         output = self._postprocess(outputs)
         return output
 
@@ -365,8 +378,9 @@ class AgentLoopWorker:
         messages: list[dict[str, Any]],
         sampling_params: dict[str, Any],
         trajectory: dict[str, Any],
+        env: Any,
         counter: Counter,
-        env_idx: int = 0,
+        env_idx: int,
     ) -> AgentLoopOutput:
         with rollout_trace_attr(
             step=trajectory["step"],
@@ -386,8 +400,8 @@ class AgentLoopWorker:
                 server_manager=self.server_manager,
                 tokenizer=self.tokenizer,
             )
-            output = await agent_loop.run(messages, sampling_params, counter, env_idx)
-            return output
+            output, last_msg = await agent_loop.run(messages, sampling_params, env, counter, env_idx)
+            return output, last_msg
 
     def _postprocess(self, inputs: list[AgentLoopOutput]) -> DataProto:
         # NOTE: consistent with batch version of generate_sequences in vllm_rollout_spmd.py
@@ -397,16 +411,13 @@ class AgentLoopWorker:
         # attention_mask: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
         # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
 
-        # # convert inputs to list[AgentLoopOutput]
-        # new_inputs = []
-        # for input_list in inputs:
-        #     for input_obj in input_list:
-        #         if len(new_inputs) < len(inputs):
-        #             new_inputs.append(input_obj)
-        # inputs = new_inputs
-
         # prompts
         self.tokenizer.padding_side = "left"
+        
+        # print prompt lengths
+        prompt_lengths = [len(input.prompt_ids) for input in inputs]
+        print("prompt lengths:", prompt_lengths)
+        
         outputs = self.tokenizer.pad(
             [{"input_ids": input.prompt_ids} for input in inputs],
             padding="max_length",
@@ -447,9 +458,6 @@ class AgentLoopWorker:
         input_ids = torch.cat([prompt_ids, response_ids], dim=1)
         attention_mask = torch.cat([prompt_attention_mask, response_attention_mask], dim=1)
         position_ids = (attention_mask.cumsum(dim=1) - 1) * attention_mask
-        
-        episode_idx = torch.arange(len(inputs), dtype=torch.int32)
-
         batch = TensorDict(
             {
                 "prompts": prompt_ids,  # [bsz, prompt_length]
@@ -460,14 +468,15 @@ class AgentLoopWorker:
                 "position_ids": position_ids,  # [bsz, prompt_length + response_length]
                 "rewards": rewards,  # [bsz]
                 "dones": dones,  # [bsz]
-                "episode_idx": episode_idx,  # [bsz]
             },
             batch_size=len(input_ids),
         )
 
         num_turns = np.array([input.num_turns for input in inputs], dtype=np.int32)
+        episode_idx = np.array([input.env_idx for input in inputs], dtype=np.int32)
+        non_tensor_batch = {"__num_turns__": num_turns, "episode_idx": episode_idx}
         metrics = [input.metrics.model_dump() for input in inputs]
-        return DataProto(batch=batch, non_tensor_batch={"__num_turns__": num_turns}, meta_info={"metrics": metrics})
+        return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info={"metrics": metrics})
 
 
 async def get_trajectory_info(step, index, validate):
@@ -583,10 +592,13 @@ class AgentLoopManager:
         if self.config.actor_rollout_ref.rollout.free_cache_engine:
             self.wake_up()
         chunkes = prompts.chunk(len(self.agent_loop_workers))
+        
+        ray.get(self.counter.reset.remote())
+        
         outputs = ray.get(
             [
-                worker.generate_sequences.remote(chunk, self.counter)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+                worker.generate_sequences.remote(chunk, self.counter, env_idx)
+                for env_idx, (worker, chunk) in enumerate(zip(self.agent_loop_workers, chunkes, strict=True))
             ]
         )
         output = DataProto.concat(outputs)
