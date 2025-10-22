@@ -11,9 +11,9 @@ ulimit -n 65535
 
 PROJECT_DIR="$(pwd)"
 CONFIG_PATH="$PROJECT_DIR/examples/sglang_multiturn/config"
-TRAIN_BATCH_SIZE=256
+TRAIN_BATCH_SIZE=64
 MICRO_BATCH_SIZE=8
-NUM_ENVIRONMENTS=32
+NUM_ENVIRONMENTS=16
 OFFLOAD=${OFFLOAD:-False}
 HF_MODEL_PATH="Qwen/Qwen2.5-3B-Instruct"
 export VLLM_USE_V1=1
@@ -37,7 +37,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     +actor_rollout_ref.model.enable_activation_offloading=False \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.entropy_coeff=0.0 \
     actor_rollout_ref.actor.ppo_mini_batch_size=$PPO_MINI_BATCH_SIZE \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
     actor_rollout_ref.actor.fsdp_config.param_offload=$OFFLOAD \
@@ -53,18 +52,19 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=$LOG_PROB_MICRO_BATCH \
     actor_rollout_ref.ref.fsdp_config.param_offload=$OFFLOAD \
     critic.optim.lr=1e-5 \
+    +critic.fsdp_config.model_dtype=bfloat16 \
     critic.model.path=$HF_MODEL_PATH \
     critic.model.enable_gradient_checkpointing=True \
     critic.ppo_micro_batch_size_per_gpu=$MICRO_BATCH_SIZE \
     critic.ppo_mini_batch_size=$PPO_MINI_BATCH_SIZE \
     critic.forward_micro_batch_size_per_gpu=$LOG_PROB_MICRO_BATCH \
-    critic.turn_value_ratio=1.0 \
+    critic.turn_value_ratio=3.0 \
     algorithm.use_kl_in_reward=False \
     trainer.val_before_train=False \
-    trainer.critic_warmup=10 \
     trainer.balance_batch=False \
-    trainer.critic_warmup_batch_repeat_times=40 \
-    trainer.critic_warmup_batch_divide_ratio=4 \
+    trainer.critic_warmup=0 \
+    trainer.critic_warmup_batch_repeat_times=0 \
+    trainer.critic_warmup_batch_divide_ratio=0 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='gsm8k_async_rl' \
     trainer.experiment_name='test_throughput' \

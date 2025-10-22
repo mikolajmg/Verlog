@@ -47,4 +47,9 @@ class BabaIsAILLMAgentsWrapper(gym.Wrapper):
             "behavior/backtrack_length": total_but_occurrences
         }
         
+        if not is_valid:
+            print("-"*30)
+            print("full_action", full_action)
+            print("-"*30)
+        
         return full_action, valid_action, is_valid, metrics

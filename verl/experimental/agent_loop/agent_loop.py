@@ -36,9 +36,41 @@ from verl.utils.fs import copy_to_local
 from verl.utils.rollout_trace import RolloutTraceConfig, rollout_trace_attr, rollout_trace_op
 from verl.workers.rollout.async_server import async_server_class
 
+from verl.envs.env import Env
+from verl.envs.environments import make_env
+from verl.envs.captioners import make_captioner
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+@ray.remote
+class Counter:
+    def __init__(self):
+        self.num_turns = 0
+        self.batch_size = 0
+        self.lock = asyncio.Lock()
+
+    async def increment(self, n=1):
+        """Increment counter by n in a thread-safe manner."""
+        async with self.lock:
+            self.num_turns += n
+            return self.num_turns > self.batch_size 
+
+    async def reset(self, batch_size):
+        """Reset counter to 0 in a thread-safe manner."""
+        async with self.lock:
+            self.batch_size = batch_size
+            self.num_turns = 0
+            
+    async def get_batch_size(self):
+        """Get current batch size."""
+        async with self.lock:
+            return self.batch_size
+        
+    async def is_full(self):
+        """Get current number of turns."""
+        async with self.lock:
+            return self.num_turns >= self.batch_size
 
 class AsyncLLMServerManager:
     """
@@ -66,13 +98,20 @@ class AsyncLLMServerManager:
         # LRU cache to map request_id to server
         self.request_id_to_server = LRUCache(maxsize=max_cache_size)
 
-    def _choose_server(self, request_id: str) -> ray.actor.ActorHandle:
+    def _choose_server(self, request_id: str, env_idx: int) -> ray.actor.ActorHandle:
         # TODO: implement server pressure awareness load balancing
         if request_id in self.request_id_to_server:
             return self.request_id_to_server[request_id]
-
-        server = self.weighted_serveres[0][1][1]
-        self.weighted_serveres[0][0] += 1
+        
+        # # choose the first server with least requests
+        # server = self.weighted_serveres[0][1][1]
+        # self.weighted_serveres[0][0] += 1
+        
+        # choose all servers with least requests
+        min_requests = self.weighted_serveres[0][0]
+        candidate_servers = [entry for entry in self.weighted_serveres if entry[0] == min_requests]
+        server = candidate_servers[env_idx % len(candidate_servers)][1][1]
+        
         heapq.heapreplace(self.weighted_serveres, self.weighted_serveres[0])
         self.request_id_to_server[request_id] = server
         return server
@@ -84,6 +123,7 @@ class AsyncLLMServerManager:
         *,
         prompt_ids: list[int],
         sampling_params: dict[str, Any],
+        env_idx: int,
     ) -> list[int]:
         """Generate tokens from prompt ids.
 
@@ -95,7 +135,7 @@ class AsyncLLMServerManager:
         Returns:
             List[int]: List of generated token ids.
         """
-        server = self._choose_server(request_id)
+        server = self._choose_server(request_id, env_idx)
         output = await server.generate.remote(
             request_id=request_id,
             prompt_ids=prompt_ids,
@@ -104,7 +144,7 @@ class AsyncLLMServerManager:
         return output
 
 
-class AgentLoopMetrics(BaseModel):
+class AgentLoopMetrics(BaseModel, extra="allow"):
     """Agent loop performance metrics."""
 
     generate_sequences: float = 0.0
@@ -124,7 +164,12 @@ class AgentLoopOutput(BaseModel):
     """Number of chat turns, including user, assistant, tool."""
     metrics: AgentLoopMetrics
     """Auxiliary performance metrics"""
-
+    reward: float = 0.0
+    """Cumulative rewards, for RL agent loop."""
+    done: bool = False
+    """Whether the episode is done, for RL agent loop."""
+    env_idx: int = 0
+    """Index of environment, for multi-env agent loop."""
 
 # make hydra.utils.instantiate happy
 class _DummyConfig:
@@ -233,8 +278,23 @@ class AgentLoopWorker:
             trace_config.get("backend"),
             trace_config.get("token2text", False),
         )
+        
+        def dict_to_namespace(d):
+            """Recursively convert dict to SimpleNamespace for dot-access."""
+            if isinstance(d, dict):
+                return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+            elif isinstance(d, list):
+                return [dict_to_namespace(i) for i in d]
+            else:
+                return d
+        config = dict_to_namespace(self.config)
+        
+        env = make_env(config.envs.env_name, config.envs.task, config)
+        captioner = make_captioner(config)
+        self.env = Env(config.envs.env_name, config, env, captioner)
+        self.env.reset()
 
-    async def generate_sequences(self, batch: DataProto) -> DataProto:
+    async def generate_sequences(self, batch: DataProto, counter: Counter, env_idx: int) -> DataProto:
         """Generate sequences from agent loop.
 
         Args:
@@ -282,22 +342,28 @@ class AgentLoopWorker:
         trajectory_info = await get_trajectory_info(
             batch.meta_info.get("global_steps", -1), index, batch.meta_info.get("validate", False)
         )
-
+        
+        # TODO!
+        agent_names = agent_names[:1]
+        raw_prompts = raw_prompts[:1]
+        trajectory_info = trajectory_info[:1]
         for agent_name, messages, trajectory in zip(agent_names, raw_prompts, trajectory_info, strict=True):
             tasks.append(
-                asyncio.create_task(self._run_agent_loop(agent_name, messages.tolist(), sampling_params, trajectory))
+                asyncio.create_task(self._run_agent_loop(agent_name, sampling_params, trajectory, self.env, counter, env_idx))
             )
         outputs = await asyncio.gather(*tasks)
-
-        output = self._postprocess(outputs)
+        
+        output = self._postprocess(outputs[0])
         return output
 
     async def _run_agent_loop(
         self,
         agent_name: str,
-        messages: list[dict[str, Any]],
         sampling_params: dict[str, Any],
         trajectory: dict[str, Any],
+        env: Any,
+        counter: Counter,
+        env_idx: int,
     ) -> AgentLoopOutput:
         with rollout_trace_attr(
             step=trajectory["step"],
@@ -317,7 +383,7 @@ class AgentLoopWorker:
                 server_manager=self.server_manager,
                 tokenizer=self.tokenizer,
             )
-            output = await agent_loop.run(messages, sampling_params)
+            output = await agent_loop.run(sampling_params, env, counter, env_idx)
             return output
 
     def _postprocess(self, inputs: list[AgentLoopOutput]) -> DataProto:
@@ -363,6 +429,9 @@ class AgentLoopWorker:
             f"mismatch in response_ids and response_mask shape: {response_ids.shape} vs {response_mask.shape}"
         )
         response_mask = response_mask * response_attention_mask
+        
+        rewards = torch.tensor([input.reward for input in inputs], dtype=torch.float32)
+        dones = torch.tensor([input.done for input in inputs], dtype=torch.bool)
 
         input_ids = torch.cat([prompt_ids, response_ids], dim=1)
         attention_mask = torch.cat([prompt_attention_mask, response_attention_mask], dim=1)
@@ -376,13 +445,18 @@ class AgentLoopWorker:
                 "input_ids": input_ids,  # [bsz, prompt_length + response_length]
                 "attention_mask": attention_mask,  # [bsz, prompt_length + response_length]
                 "position_ids": position_ids,  # [bsz, prompt_length + response_length]
+                "rewards": rewards,  # [bsz]
+                "dones": dones,  # [bsz]
             },
             batch_size=len(input_ids),
         )
 
         num_turns = np.array([input.num_turns for input in inputs], dtype=np.int32)
+        episode_idx = np.array([input.env_idx for input in inputs], dtype=np.int32)
+        non_tensor_batch = {"__num_turns__": num_turns, "episode_idx": episode_idx}
         metrics = [input.metrics.model_dump() for input in inputs]
-        return DataProto(batch=batch, non_tensor_batch={"__num_turns__": num_turns}, meta_info={"metrics": metrics})
+        
+        return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info={"metrics": metrics})
 
 
 async def get_trajectory_info(step, index, validate):
@@ -420,6 +494,9 @@ class AgentLoopManager:
         self.config = config
         self.worker_group = worker_group
 
+        # In AgentLoopManager.__init__
+        self.counter = Counter.remote() #batch_size=config.data.train_batch_size)
+        
         self._initialize_llm_servers()
         self._init_agent_loop_workers()
 
@@ -495,10 +572,14 @@ class AgentLoopManager:
         if self.config.actor_rollout_ref.rollout.free_cache_engine:
             self.wake_up()
         chunkes = prompts.chunk(len(self.agent_loop_workers))
+        
+        gen_batch_size = prompts.meta_info.get("gen_batch_size", len(prompts))
+        ray.get(self.counter.reset.remote(gen_batch_size))
+        
         outputs = ray.get(
             [
-                worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+                worker.generate_sequences.remote(chunk, self.counter, env_idx)
+                for env_idx, (worker, chunk) in enumerate(zip(self.agent_loop_workers, chunkes, strict=True))
             ]
         )
         output = DataProto.concat(outputs)
@@ -508,9 +589,26 @@ class AgentLoopManager:
         # calculate performance metrics
         metrics = [output.meta_info["metrics"] for output in outputs]  # List[List[Dict[str, str]]]
         timing = self._performance_metrics(metrics, output)
+        
+        # calculate behavior statistics
+        behavior_stats = self._behavior_metrics(metrics, output)
 
-        output.meta_info = {"timing": timing}
+        output.meta_info = {"timing": timing, "behavior_stats": behavior_stats}
+        
         return output
+    
+    def _behavior_metrics(self, metrics: list[list[dict[str, str]]], output: DataProto) -> dict[str, float]:
+        # behavior_name = metrics[0][0].keys().startwith("behavior/")
+        behavior_names = [key for key in metrics[0][0].keys() if key.startswith("behavior/")]
+        behavior_stats = {}
+        for metric_name in behavior_names:
+            behavior_values = np.array([metric[metric_name] if metric_name in metric else None for chunk in metrics for metric in chunk])
+            # behavior_stats[metric_name] = behavior_values.mean() # consider None values
+            valid_values = behavior_values[behavior_values != np.array(None)].astype(np.float32)
+            if len(valid_values) > 0:
+                behavior_stats[metric_name] = valid_values.mean()
+        return behavior_stats
+        
 
     def _performance_metrics(self, metrics: list[list[dict[str, str]]], output: DataProto) -> dict[str, float]:
         timing = {}

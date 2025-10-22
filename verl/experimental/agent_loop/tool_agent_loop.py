@@ -17,6 +17,8 @@ import logging
 import os
 from typing import Any
 from uuid import uuid4
+import numpy as np
+import copy
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
@@ -54,9 +56,12 @@ class ToolAgentLoop(AgentLoopBase):
         cls.prompt_length = config.actor_rollout_ref.rollout.prompt_length
         cls.response_length = config.actor_rollout_ref.rollout.response_length
         cls.system_prompt = tokenizer.apply_chat_template([{}], add_generation_prompt=False, tokenize=True)
-
+    
     @rollout_trace_op
-    async def run(self, messages: list[dict[str, Any]], sampling_params: dict[str, Any]) -> AgentLoopOutput:
+    async def run(self, sampling_params: dict[str, Any], env, counter, env_idx) -> AgentLoopOutput:
+        
+        messages, info = env.get_last_obs()
+        
         metrics = {}
         request_id = uuid4().hex
         prompt_ids = await self.loop.run_in_executor(
@@ -65,72 +70,80 @@ class ToolAgentLoop(AgentLoopBase):
                 messages, tools=self.tool_schemas, add_generation_prompt=True, tokenize=True
             ),
         )
-        response_mask = []
-
-        user_turns, assistant_turns = 0, 0
+        
+        output = []
+        # user_turns, assistant_turns = 0, 0
+        num_turns = 0
         while True:
+            
             with simple_timer("generate_sequences", metrics):
+                
                 response_ids = await self.server_manager.generate(
-                    request_id=request_id, prompt_ids=prompt_ids, sampling_params=sampling_params
+                    request_id=request_id, prompt_ids=prompt_ids, sampling_params=sampling_params, env_idx=env_idx,
                 )
-            prompt_ids += response_ids
-            response_mask += [1] * len(response_ids)
-            assistant_turns += 1
-
-            # reach max response length
-            if len(response_mask) >= self.response_length:
-                break
-
-            # reach max assistant turns
-            if self.max_assistant_turns and assistant_turns >= self.max_assistant_turns:
-                break
-
-            # reach max user turns
-            if self.max_user_turns and user_turns >= self.max_user_turns:
-                break
-
-            # no tool calls
-            _, tool_calls = await self.tool_parser.extract_tool_calls(response_ids)
-            if not tool_calls:
-                break
-
-            # call tools
-            tasks = []
-            for tool_call in tool_calls[: self.max_parallel_calls]:
-                tasks.append(self._call_tool(tool_call))
-            with simple_timer("tool_calls", metrics):
-                tool_responses = await asyncio.gather(*tasks)
-            if any(isinstance(item, Exception) for item in tool_responses):
-                break
-
-            # append tool_response_ids
-            tool_response_ids = await self.loop.run_in_executor(
+            
+            # truncate response_ids to response_length
+            response_ids = response_ids[: self.response_length]
+            response_mask = [1] * len(response_ids)
+            
+            # TODO: decode actions from the response ids
+            actions = await self.loop.run_in_executor(
                 None,
-                lambda messages=tool_responses: self.tokenizer.apply_chat_template(
-                    messages, add_generation_prompt=True, tokenize=True
+                lambda: self.tokenizer.decode(response_ids, skip_special_tokens=True)
+            )
+            
+            metrics.update(info.get("metrics", {}))
+            
+            last_prompt_ids = copy.deepcopy(prompt_ids)
+            is_full = await counter.is_full.remote()
+            if is_full:
+                break
+            
+            messages, reward, terminated, truncated, info = env.step(actions)
+            done = np.logical_or(terminated, truncated)
+            
+            turn_data = AgentLoopOutput(
+                prompt_ids=prompt_ids,
+                response_ids=response_ids,
+                response_mask=response_mask,
+                metrics=metrics,
+                reward=reward,
+                done=done,
+                num_turns=num_turns,
+                env_idx=env_idx,
+            )
+            num_turns += 1
+            
+            # batch_size = await counter.get_batch_size.remote()
+            # mini_batch_size = int(batch_size // 32)
+            # if num_turns == mini_batch_size + 1:
+            #     break
+            
+            prompt_ids = await self.loop.run_in_executor(
+                None,
+                lambda: self.tokenizer.apply_chat_template(
+                    messages, tools=self.tool_schemas, add_generation_prompt=True, tokenize=True
                 ),
             )
-            tool_response_ids = tool_response_ids[len(self.system_prompt) :]
-
-            # NOTE: last turn should not be user turn, or the EOS token reward
-            # can't be propagated to previous token in GAE.
-            if len(response_mask) + len(tool_response_ids) >= self.response_length:
-                break
-
-            prompt_ids += tool_response_ids
-            response_mask += [0] * len(tool_response_ids)
-            user_turns += 1
-
-        response_ids = prompt_ids[-len(response_mask) :]
-        prompt_ids = prompt_ids[: len(prompt_ids) - len(response_mask)]
-
-        output = AgentLoopOutput(
-            prompt_ids=prompt_ids,
-            response_ids=response_ids[: self.response_length],
-            response_mask=response_mask[: self.response_length],
-            num_turns=user_turns + assistant_turns + 1,
-            metrics=metrics,
+            
+            is_full = await counter.increment.remote()
+            if is_full:
+                break # will discard the last turn data
+            else:
+                output.append(turn_data)
+            
+        turn_data = AgentLoopOutput(
+            prompt_ids=last_prompt_ids,
+            response_ids=[output[-1].response_ids[0]] if output else [151645],
+            response_mask=[1],
+            metrics=dict(),
+            reward=0.0,
+            done=done,
+            num_turns=num_turns,
+            env_idx=env_idx,
         )
+        output.append(turn_data)
+        
         return output
 
     async def _call_tool(self, tool_call: FunctionCall) -> dict[str, str]:
