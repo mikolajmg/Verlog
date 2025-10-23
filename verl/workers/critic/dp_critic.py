@@ -223,13 +223,14 @@ class DataParallelPPOCritic(BasePPOCritic):
                     returns = model_inputs["returns"]
 
                     vpreds = self._forward_micro_batch(model_inputs)
-                    vf_loss, vf_clipfrac = core_algos.compute_value_loss(
+                    vf_loss, vf_clipfrac, turn_vf_loss = core_algos.compute_value_loss(
                         vpreds=vpreds,
                         values=values,
                         returns=returns,
                         response_mask=response_mask,
                         cliprange_value=self.config.cliprange_value,
                         loss_agg_mode=self.config.loss_agg_mode,
+                        turn_value_ratio=self.config.turn_value_ratio,
                     )
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
@@ -241,6 +242,7 @@ class DataParallelPPOCritic(BasePPOCritic):
 
                     micro_batch_metrics.update(
                         {
+                            "critic/turn_vf_loss": turn_vf_loss.detach().item(),
                             "critic/vf_loss": vf_loss.detach().item(),
                             "critic/vf_clipfrac": vf_clipfrac.detach().item(),
                             "critic/vpred_mean": masked_mean(vpreds, response_mask).detach().item(),
