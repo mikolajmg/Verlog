@@ -1,6 +1,8 @@
 import gymnasium as gym
 from PIL import Image
 
+import numpy as np
+
 POSSIBLE_ACTIONS = [
     "turn left",
     "turn to the left",
@@ -62,6 +64,10 @@ class BabyAILLMAgentsWrapper(gym.Wrapper):
             lower_pred_action = "go forward"
         elif lower_pred_action == "pickup":
             lower_pred_action = "pick up"
+        elif lower_pred_action == "go left":
+            lower_pred_action = "turn left"
+        elif lower_pred_action == "go right":
+            lower_pred_action = "turn right"
             
         action = lower_pred_action
         
@@ -73,6 +79,14 @@ class BabyAILLMAgentsWrapper(gym.Wrapper):
         
         is_valid = action in self.language_action_space
         valid_count = 1.0 if is_valid else 0.0
+        
+        # if not is_valid:
+        #     print(f"Invalid action:\n\n", full_action, "\n\n")
+        #     print("=" * 30)
+            
+        # if np.random.rand() < 1. / 256.:
+        #     print(f"Sampled action:\n\n", full_action, "\n\n")
+        #     print("=" * 30)
         
         total_but_occurrences = 0
         for word in ["However", "different", "but", "wait", "won't", "can't", "cannot", "another"]:

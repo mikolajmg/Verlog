@@ -172,10 +172,16 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
 
     # multi-turn conversation
     if "__num_turns__" in batch.non_tensor_batch:
-        num_turns = batch.non_tensor_batch["__num_turns__"]
-        metrics["num_turns/min"] = num_turns.min()
-        metrics["num_turns/max"] = num_turns.max()
-        metrics["num_turns/mean"] = num_turns.mean()
+        episode_structure = batch.meta_info.get("episode_structure", None)
+        num_turns = batch.non_tensor_batch["__num_turns__"] + 1
+        all_num_turn = []
+        for episode_indices in episode_structure:
+            num_turn = num_turns[episode_indices[-1]] 
+            all_num_turn.append(num_turn)
+        all_num_turn = torch.tensor(all_num_turn, dtype=torch.float32)
+        metrics["num_turns/min"] = all_num_turn.min().item()
+        metrics["num_turns/max"] = all_num_turn.max().item()
+        metrics["num_turns/mean"] = all_num_turn.mean().item()
 
     return metrics
 
