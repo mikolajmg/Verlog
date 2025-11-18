@@ -93,7 +93,7 @@ actor_rollout_ref:
     ignore_eos: False
     enforce_eager: True
     free_cache_engine: True
-    load_format: dummy_dtensor
+    load_format: auto  # auto / hf / vllm
     tensor_model_parallel_size: 2
     max_num_batched_tokens: 8192
     max_model_len: null
@@ -209,6 +209,7 @@ trainer:
   log_val_generations: 1 # log one msg per validation step
   nnodes: 1
   n_gpus_per_node: 8
+  n_cpus_per_node: 4
   save_freq: -1
   # auto: find the last ckpt to resume. If can't find, start from scratch
   resume_mode: auto # or disable or resume_path if resume_from_path is set
