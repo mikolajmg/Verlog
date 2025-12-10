@@ -16,7 +16,9 @@ pylatexenc
 pylint==3.3.6
 ray[default]
 tensordict<=0.6.2
+torch==2.9.0 # (+cu128)
+triton==3.5.0
 torchdata
 transformers
-# vllm==0.6.3.post1
+vllm==0.12.0
 wandb

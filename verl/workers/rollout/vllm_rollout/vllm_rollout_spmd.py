@@ -25,10 +25,11 @@ When working with Megatron:
 - After inference, all the parameters that doesn't belong to this pp rank is freed.
 """
 import os
+from copy import deepcopy
 import numpy as np
 from typing import List
 from contextlib import contextmanager
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 import torch
 import torch.distributed
 from tensordict import TensorDict
@@ -77,6 +78,8 @@ class vLLMRollout(BaseRollout):
         """
         super().__init__()
         self.config = config
+        # Keep a local model executor handle for weight sharing and debugging.
+        os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
         assert not (not config.enforce_eager and config.free_cache_engine), \
             "disable CUDA graph (enforce_eager = False) if free cache engine"
 
@@ -84,6 +87,9 @@ class vLLMRollout(BaseRollout):
         assert tensor_parallel_size <= torch.distributed.get_world_size(), \
             "tensor parallel size should be less than or equal to the world size"
         max_num_batched_tokens = self.config.get('max_num_batched_tokens', 8192)
+        max_num_seqs = self.config.get('max_num_seqs', None)
+        quantization = self.config.get('quantization', None)
+        kv_cache_dtype = self.config.get('kv_cache_dtype', None)
 
         if kwargs.get('train_tp', None) is not None:
             # deployed with megatron
@@ -111,25 +117,40 @@ class vLLMRollout(BaseRollout):
         trust_remote_code = kwargs.get('trust_remote_code', False)
         load_format = 'dummy' if config.load_format.startswith('dummy') else config.load_format
 
+        engine_kwargs = {} if 'engine_kwargs' not in config else OmegaConf.to_container(
+            deepcopy(config.engine_kwargs))
+        engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        if quantization is not None:
+            engine_kwargs.setdefault('quantization', quantization)
+        if kv_cache_dtype is not None:
+            engine_kwargs.setdefault('kv_cache_dtype', kv_cache_dtype)
+        if max_num_seqs is not None:
+            engine_kwargs.setdefault('max_num_seqs', max_num_seqs)
+        for duplicate_key in ('quantization', 'max_model_len', 'max_num_batched_tokens', 'max_num_seqs'):
+            engine_kwargs.pop(duplicate_key, None)
+
         self.inference_engine = LLM(
             model=model_path,
             enable_sleep_mode=True,
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="external_launcher",
             dtype=config.dtype,
+            quantization=quantization,
             enforce_eager=config.enforce_eager,
             gpu_memory_utilization=config.gpu_memory_utilization,
             disable_custom_all_reduce=True,
             disable_mm_preprocessor_cache=False,
             skip_tokenizer_init=False,
             max_model_len=max_model_len,
+            max_num_seqs=max_num_seqs,
+            max_num_batched_tokens=max_num_batched_tokens,
             load_format=load_format,
             disable_log_stats=config.disable_log_stats,
-            max_num_batched_tokens=max_num_batched_tokens,
             enable_chunked_prefill=config.enable_chunked_prefill,
             enable_prefix_caching=True,
             trust_remote_code=trust_remote_code,
             seed=int(os.getenv("RANK", "0")) // tensor_parallel_size,
+            **engine_kwargs,
         )
 
         # Offload vllm model to reduce peak memory usage

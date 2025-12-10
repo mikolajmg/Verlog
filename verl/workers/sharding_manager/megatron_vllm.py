@@ -300,6 +300,13 @@ class MegatronVLLMShardingManager(BaseShardingManager):
             if rank in ranks:
                 _MICRO_DATA_PARALLEL_GROUP = group
 
+    def _get_model_runner(self):
+        engine = self.inference_engine.llm_engine
+        if not hasattr(engine, 'model_executor'):
+            raise RuntimeError('vLLM model_executor handle not found. Set VLLM_ENABLE_V1_MULTIPROCESSING=0 '
+                               'before constructing the LLM to enable Megatron weight syncing.')
+        return engine.model_executor.driver_worker.worker.model_runner
+
     def _make_iterator(self, params: Dict[str, Union[torch.Tensor,
                                                      list]]) -> Iterable[Tuple[str, Union[torch.Tensor, list]]]:
         for name, tensor in params.items():
@@ -424,7 +431,7 @@ class MegatronVLLMShardingManager(BaseShardingManager):
         else:
             per_tensor_param = self._post_process_params(cur_tp_rank_param, convert_qkv_gate_up_by_simple_split=True)
             self.inference_engine.wake_up()
-            model = self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+            model = self._get_model_runner().model
             loaded_params = model.load_weights(per_tensor_param)
             logger.info(f"vLLM load weights, loaded_params: {len(loaded_params)}")
         log_gpu_memory_usage('After load_weights sharding manager memory', logger=logger)

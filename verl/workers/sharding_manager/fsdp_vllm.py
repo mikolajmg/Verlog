@@ -75,6 +75,13 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         else:
             self.gen_random_states = None
 
+    def _get_model_runner(self):
+        engine = self.inference_engine.llm_engine
+        if not hasattr(engine, 'model_executor'):
+            raise RuntimeError('vLLM model_executor handle not found. Set VLLM_ENABLE_V1_MULTIPROCESSING=0 '
+                               'before constructing the LLM to enable weight syncing.')
+        return engine.model_executor.driver_worker.worker.model_runner
+
     def __enter__(self):
         # NOTE: Basically, we only need `torch.cuda.empty_cache()` before vllm wake_up and
         # after vllm sleep, since vllm has its own caching memory allocator CuMemAllocator.
@@ -172,7 +179,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         return data.chunk(chunks=self.tp_size)[self.tp_rank]
 
     def update_params(self, updated_params):
-        model = self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+        model = self._get_model_runner().model
         world_size = torch.distributed.get_world_size()
         if model.config.architectures[0] in ['DeepseekV2ForCausalLM', 'DeepseekV3ForCausalLM']:
             loaded_params = patched_ds_v3_load_weights(

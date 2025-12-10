@@ -70,6 +70,7 @@ def are_lists_similar(a, b):
 
 
 def test_vllm_spmd():
+    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     assert torch.cuda.device_count() >= 2, 'At least 2 GPUs is required to run tp+dp tests.'
     local_rank, rank, world_size = initialize_global_process_group()
 

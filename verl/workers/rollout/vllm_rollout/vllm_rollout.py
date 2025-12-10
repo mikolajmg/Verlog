@@ -94,6 +94,7 @@ class vLLMRollout(BaseRollout):
         max_model_len = self.config.max_model_len if self.config.max_model_len \
                         else config.prompt_length + config.response_length
         max_model_len = int(max_model_len)
+        quantization = config.get('quantization', None)
 
         if max_num_batched_tokens < max_model_len and self.config.enable_chunked_prefill:
             raise ValueError('Enable chunked prefill, max_num_batched_tokens is smaller than max_model_len, \
@@ -106,15 +107,19 @@ class vLLMRollout(BaseRollout):
         #    (which can vary across different vLLM versions);
         # - Otherwise it's the desired value we want to explicitly set.
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        for duplicate_key in ('quantization', 'max_model_len', 'max_num_batched_tokens', 'max_num_seqs'):
+            engine_kwargs.pop(duplicate_key, None)
         self.inference_engine = LLM(actor_module,
                                     tokenizer=tokenizer,
                                     model_hf_config=model_hf_config,
                                     tensor_parallel_size=tensor_parallel_size,
                                     dtype=config.dtype,
+                                    quantization=quantization,
                                     enforce_eager=config.enforce_eager,
                                     gpu_memory_utilization=config.gpu_memory_utilization,
                                     skip_tokenizer_init=False,
                                     max_model_len=max_model_len,
+                                    max_num_seqs=config.get('max_num_seqs', None),
                                     load_format=config.load_format,
                                     disable_log_stats=config.disable_log_stats,
                                     max_num_batched_tokens=max_num_batched_tokens,

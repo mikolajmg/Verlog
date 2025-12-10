@@ -102,6 +102,7 @@ actor_rollout_ref:
     response_length: ${data.max_response_length}
     # for vllm rollout
     dtype: bfloat16 # should align with FSDP
+    quantization: null # set to mxfp4 for gpt-oss
     gpu_memory_utilization: 0.5
     ignore_eos: False
     enforce_eager: True
@@ -111,6 +112,7 @@ actor_rollout_ref:
     max_num_batched_tokens: 8192
     max_model_len: null
     max_num_seqs: 1024
+    kv_cache_dtype: null
     log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
     log_prob_micro_batch_size_per_gpu: null
     disable_log_stats: True
