@@ -2,7 +2,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=64G
+#SBATCH --mem=256G
 #SBATCH --time=05:29:58
 #SBATCH --gres=gpu:0
 #SBATCH --account=plgbro4ppo-gpu-gh200
@@ -19,23 +19,22 @@ ml CUDA/12.8.0
 
 
 
-rm -rf .venv
-python3 -m venv .venv
+rm -rf .venv2
+python3 -m venv .venv2
 
 
-source .venv/bin/activate
+source .venv2/bin/activate
 
-
-pip install --upgrade pip setuptools wheel packaging ninja 
-
-pip install --upgrade pip wheel --no-cache-dir 
+pip install wheel
 python3 -c "from wheel.bdist_wheel import bdist_wheel; print('OK')"
-pip install --upgrade pip setuptools wheel
+pip install --upgrade pip setuptools wheel packaging ninja psutil
+#pip install --no-cache-dir torch==2.7.1+cu128  --index-url https://download.pytorch.org/whl/cu128
 
+# vvlm needs to be predownloaded
 
 pip install --no-cache-dir torch==2.7.1+cu128  --index-url https://download.pytorch.org/whl/cu128
 
-# vllm needs to be predownloaded https://huggingface.co/datasets/malaysia-ai/GH200-ARM64-vLLM-wheel/blob/main/vllm-0.9.2.dev0%2Bgb6553be1b.d20250704-cp311-cp311-linux_aarch64.whl
+# vvlm needs to be predownloaded
 pip3 install vllm-0.9.2.dev0+gb6553be1b.d20250704-cp311-cp311-linux_aarch64.whl
 
 
@@ -55,25 +54,29 @@ pip install --no-cache-dir  accelerate datasets peft hf-transfer \
 
 pip install --no-cache-dir tensordict codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler \
     pytest py-spy pre-commit ruff torchdata
+pip install /net/scratch/hscra/plgrid/plgmikolajg/Verlog/flash_attn_3-3.0.0b1-cp39-abi3-manylinux2014_aarch64.whl --no-cache-dir
+# cd ../flash-attention
+# export TORCH_CUDA_ARCH_LIST="80;90"
+# MAX_JOBS=1 python setup.py install
+pip install bitsandbytes
 
-# this will take a while...
-cd ../flash-attention
-export TORCH_CUDA_ARCH_LIST="80;90"
-MAX_JOBS=1 python setup.py install
-
-
-
+pip install --upgrade pip wheel --no-cache-dir 
+python3 -c "from wheel.bdist_wheel import bdist_wheel; print('OK')"
+pip install --upgrade pip setuptools wheel
 
 pip install --no-cache-dir tensordict codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler \
     pytest py-spy pre-commit ruff torchdata
 cd ../Verlog
 
-#check if flash attention and vllm are working
-# if you get raise ValueError(f"'{key}' is already used by a Transformers config, pick another name.")
-# look at this change: https://github.com/vllm-project/vllm/commit/3fc964433a84bad785d9d0656fd56195462321b8
+
 pip install -e --no-cache-dir .
+
+pip install triton --no-cache-dir
+
+
 pip list
 python3 -c "from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_first_axis"
+python3 -c "from flash_attn_interface.bert_padding import pad_input, unpad_input, rearrange, index_first_axis"
 python3 -c "import vllm._C"
 
 
@@ -82,3 +85,4 @@ python3 -c "import vllm._C"
 
 
 exit 0
+

@@ -51,7 +51,7 @@ actor_rollout_ref:
     shuffle: False
     ulysses_sequence_parallel_size: 1 # sp size
     checkpoint:
-      contents: ['model', 'optimizer', 'extra']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
+      contents: ['model', 'optimizer', 'extra', 'hf_model']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
     optim:
       lr: 1e-6
       lr_warmup_steps: -1 # Prioritized. Negative values mean delegating to lr_warmup_steps_ratio.
@@ -91,8 +91,8 @@ actor_rollout_ref:
     dtype: bfloat16 # should align with FSDP
     gpu_memory_utilization: 0.5
     ignore_eos: False
-    enforce_eager: True
-    free_cache_engine: True
+    enforce_eager: False
+    free_cache_engine: False
     load_format: auto  # auto / hf / vllm
     tensor_model_parallel_size: 2
     max_num_batched_tokens: 8192
@@ -165,7 +165,7 @@ reward_model:
   strategy: fsdp
   model:
     input_tokenizer: ${actor_rollout_ref.model.path}  # set this to null if the chat template is identical
-    path: ~/models/FsfairX-LLaMA3-RM-v0.1
+    path: Qwen/Qwen2.5-1.5B-Instruct
     external_lib: ${actor_rollout_ref.model.external_lib}
     use_remove_padding: False
     fsdp_config:
@@ -179,8 +179,21 @@ reward_model:
   ulysses_sequence_parallel_size: 1 # sp size
   use_dynamic_bsz: ${critic.use_dynamic_bsz}
   forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
-  reward_manager: naive
+  reward_manager: bridge # reward manager llm_judge to create llm
+  reward_kwargs:
+    num_examine: 5
+    
+    judge_enable: True      # Czy LLM ma oceniać trajektorie?
+    judge_frequency: 1
 
+
+support_model:
+  enable: False
+  model_path: Qwen/Qwen2.5-1.5B-Instruct #openai/gpt-oss-120b  #unsloth/gpt-oss-120b-unsloth-bnb-4bit 
+  planner:
+    enable: False        # Czy dodawać plan do promptu?
+    frequency: 5     # Co ile kroków dodawać plan?
+    max_plan_length: 300
 custom_reward_function:
   path: null
   name: compute_score
@@ -217,7 +230,7 @@ trainer:
   val_before_train: True
   test_freq: -1
   critic_warmup: 0
-  critic_warmup_step: 0
+  critic_warmup_step: 1
   default_hdfs_dir: null
   del_local_ckpt_after_load: False
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}

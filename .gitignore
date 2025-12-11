@@ -20,6 +20,7 @@ tensorflow/my_graph/*
 *.so
 
 # Distribution / packaging
+venv_osh/
 .Python
 env/
 build/
@@ -94,9 +95,9 @@ celerybeat-schedule
 
 # virtualenv
 venv/
-.venv/
+.venv*/
 ENV/
-
+venv_login/
 # Spyder project settings
 .spyderproject
 

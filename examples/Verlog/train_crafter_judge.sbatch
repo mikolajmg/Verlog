@@ -2,8 +2,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=128G
-#SBATCH --time=01:29:58
+#SBATCH --mem=256G
+#SBATCH --time=00:29:58
 #SBATCH --gres=gpu:2
 #SBATCH --account=plgbro4ppo-gpu-gh200
 #SBATCH --partition=plgrid-gpu-gh200
@@ -13,14 +13,12 @@
 ml purge
 ml ML-bundle/24.06a
 ml GCCcore/13.3.0
-#ml CUDA/12.8.0
 ml CUDA/12.8.0
 
-source .venv3/bin/activate
-#pip install --upgrade  kernels
 
+source .venv/bin/activate
 
-#pip install --no-cache-dir torch==2.7.1+cu128  --index-url https://download.pytorch.org/whl/cu128
+pip install wandb-osh
 #pip uninstall -y vllm
 #pip3 install vllm-0.9.2.dev0+gb6553be1b.d20250704-cp311-cp311-linux_aarch64.whl
 # 3. Install helper packages
@@ -33,9 +31,8 @@ source .venv3/bin/activate
 # python3 -c "from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_first_axis"
 
 export HYDRA_FULL_ERROR=1
-#pip install bitsandbytes
-#pip install unsloth
-python3 -c "import torch; print(f'Torch: {torch.__version__}'); import flash_attn; print('Flash Attention load success!')"
+
+
 #pip install flashinfer-python
 
 pip list
@@ -44,7 +41,7 @@ set -e
 export WANDB_ENTITY="ideas-ncbr"
 export WANDB_MODE="offline"
 model=Qwen/Qwen2.5-1.5B-Instruct
-micro_batch_size=4
+micro_batch_size=16
 
 #export DISABLE_FLASH_ATTN=1
 
@@ -52,8 +49,8 @@ micro_batch_size=4
 PYTHONUNBUFFERED=1  python3 -m verl.trainer.main_ppo \
  data.max_prompt_length=4096  \
  data.max_response_length=512  \
- data.train_batch_size=32 \
- actor_rollout_ref.actor.ppo_mini_batch_size=16  \
+ data.train_batch_size=512 \
+ actor_rollout_ref.actor.ppo_mini_batch_size=128  \
  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$micro_batch_size \
  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$micro_batch_size \
  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=$micro_batch_size \
@@ -68,7 +65,7 @@ PYTHONUNBUFFERED=1  python3 -m verl.trainer.main_ppo \
  algorithm.step_lam=0.95 \
  algorithm.use_kl_in_reward=True \
  algorithm.kl_ctrl.kl_coef=0.001 \
- envs.n_rollouts=4 \
+ envs.n_rollouts=16 \
  envs.env_name=crafter \
  envs.task=default \
  envs.format_penalty=0.1 \
@@ -77,7 +74,7 @@ PYTHONUNBUFFERED=1  python3 -m verl.trainer.main_ppo \
  envs.captioner.max_text_history=1 \
  envs.captioner.max_cot_history=1 \
  trainer.project_name="plan-crl" \
- trainer.experiment_name="testing" \
+ trainer.experiment_name="Qwen0.5B-Crafter-2GPU" \
  trainer.val_before_train=False \
  trainer.critic_warmup=20 \
  trainer.critic_warmup_step=20 \
@@ -88,8 +85,6 @@ PYTHONUNBUFFERED=1  python3 -m verl.trainer.main_ppo \
  trainer.save_freq=10 \
  trainer.test_freq=5 \
  trainer.render=False \
- support_model.enable=True \
- reward_model.enable=True \
- reward_model.strategy="bridge" \
- support_model.planner.enable=True \
+  reward_model.enable=True \
+ reward_model.reward_manager="llm_judge" \
  trainer.total_epochs=300 2>&1 | tee verl_demo.log
