@@ -19,11 +19,11 @@ ml CUDA/12.8.0
 
 
 
-rm -rf .venv
-python3 -m venv .venv
+rm -rf .venv4
+python3 -m venv .venv4
 
 
-source .venv/bin/activate
+source .venv4/bin/activate
 
 
 pip install --upgrade pip setuptools wheel packaging ninja 
@@ -33,9 +33,9 @@ python3 -c "from wheel.bdist_wheel import bdist_wheel; print('OK')"
 pip install --upgrade pip setuptools wheel
 
 
-pip install --no-cache-dir torch==2.7.1+cu128  --index-url https://download.pytorch.org/whl/cu128
-
-# vllm needs to be predownloaded https://huggingface.co/datasets/malaysia-ai/GH200-ARM64-vLLM-wheel/blob/main/vllm-0.9.2.dev0%2Bgb6553be1b.d20250704-cp311-cp311-linux_aarch64.whl
+pip install torch==2.9.0 torchvision==0.24.0 torchaudio==2.9.0 --index-url https://download.pytorch.org/whl/cu128
+pip install triton
+# vvlm needs to be predownloaded
 pip3 install vllm-0.9.2.dev0+gb6553be1b.d20250704-cp311-cp311-linux_aarch64.whl
 
 
@@ -56,7 +56,6 @@ pip install --no-cache-dir  accelerate datasets peft hf-transfer \
 pip install --no-cache-dir tensordict codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler \
     pytest py-spy pre-commit ruff torchdata
 
-# this will take a while...
 cd ../flash-attention
 export TORCH_CUDA_ARCH_LIST="80;90"
 MAX_JOBS=1 python setup.py install
@@ -68,12 +67,11 @@ pip install --no-cache-dir tensordict codetiming hydra-core pylatexenc qwen-vl-u
     pytest py-spy pre-commit ruff torchdata
 cd ../Verlog
 
-#check if flash attention and vllm are working
-# if you get raise ValueError(f"'{key}' is already used by a Transformers config, pick another name.")
-# look at this change: https://github.com/vllm-project/vllm/commit/3fc964433a84bad785d9d0656fd56195462321b8
+
 pip install -e --no-cache-dir .
 pip list
 python3 -c "from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_first_axis"
+python3 -c "from flash_attn_interface.bert_padding import pad_input, unpad_input, rearrange, index_first_axis"
 python3 -c "import vllm._C"
 
 

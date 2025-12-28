@@ -61,6 +61,7 @@ class Role(Enum):
     RefPolicy = 4
     RewardModel = 5
     ActorRolloutRef = 6
+    SupportedModel = 7
 
 
 class AdvantageEstimator(str, Enum):
@@ -342,6 +343,8 @@ class RayPPOTrainer(object):
 
         # 1. Check total batch size for data correctness
         real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
+        if config.support_model.enable:
+            n_gpus -=1  # supported model uses 1 GPU
         assert real_train_batch_size % n_gpus == 0, \
             f"real_train_batch_size ({real_train_batch_size}) must be divisible by total n_gpus ({n_gpus})."
 
@@ -393,9 +396,9 @@ class RayPPOTrainer(object):
                                      "critic")
 
         # Check for reward model micro-batch size conflicts
-        if config.reward_model.enable and not config.reward_model.use_dynamic_bsz:
-            check_mutually_exclusive(config.reward_model.micro_batch_size, config.reward_model.micro_batch_size_per_gpu,
-                                     "reward_model")
+        # if config.reward_model.enable and not config.reward_model.use_dynamic_bsz:
+        #     check_mutually_exclusive(config.reward_model.micro_batch_size, config.reward_model.micro_batch_size_per_gpu,
+        #                              "reward_model")
 
         # Actor
         # check if train_batch_size is larger than ppo_mini_batch_size
@@ -506,7 +509,7 @@ class RayPPOTrainer(object):
         print(f'Size of train dataloader: {len(self.train_dataloader)}')
 
         # inject total_training_steps to actor/critic optim_config. This is hacky.
-        total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
+        total_training_steps =  self.config.trainer.total_epochs #*len(self.train_dataloader)
 
         if self.config.trainer.total_training_steps is not None:
             total_training_steps = self.config.trainer.total_training_steps
@@ -545,8 +548,12 @@ class RayPPOTrainer(object):
 
     def _validate(self):
 
-        max_seq_len = self.config.data.max_prompt_length
-        val_obs, val_info = self.val_env.reset()
+        plan_len =  0
+        if self.config.support_model.enable and self.config.support_model.planner.enable:
+                plan_len = self.config.support_model.planner.max_plan_length
+                
+        max_seq_len = self.config.data.max_prompt_length+plan_len # TODO: query from config
+        val_obs,val_plan_obs, val_info = self.val_env.reset()
         
         # Lists to collect samples for the table
         sample_inputs = []
@@ -555,9 +562,16 @@ class RayPPOTrainer(object):
         end_of_traj = None
         rew_of_traj = 0.
         len_of_traj = 0.
-        
+        counter=0
         while True:
-            
+            if self.config.support_model.enable and self.config.support_model.planner.enable:
+                frequency = self.config.support_model.planner.frequency
+                if counter % frequency == 0:
+                    futures = self.planner.generate_plan.remote(list(val_plan_obs))
+                    val_obs, plans = ray.get(futures)
+                    cached_plans = plans
+                else:
+                    val_obs = [o + p for o, p in zip(val_obs, cached_plans)]
             self.tokenizer.padding_side = "left"
             val_input_obs_text = self.tokenizer.apply_chat_template(val_obs, tokenize=False, add_generation_prompt=True) #, enable_thinking=True)
             sample_inputs.extend(val_input_obs_text)
@@ -589,8 +603,7 @@ class RayPPOTrainer(object):
             actions = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
             sample_outputs.extend(actions)
             
-            val_obs, val_reward, val_terminated, val_truncated, val_info = self.val_env.step(actions)
-            
+            val_obs,val_plan_obs, val_reward, val_terminated, val_truncated, val_info = self.val_env.step(actions)
             if end_of_traj is None:
                 end_of_traj = np.logical_or(val_terminated, val_truncated)
                 rew_of_traj = val_reward
@@ -602,7 +615,7 @@ class RayPPOTrainer(object):
                 end_of_traj = np.logical_or(end_of_traj, done)
             
             sample_scores.extend(rew_of_traj)
-            
+            counter+=1
             if end_of_traj.all():
                 break
         
@@ -655,6 +668,20 @@ class RayPPOTrainer(object):
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
             self.resource_pool_to_cls[resource_pool]['rm'] = rm_cls
 
+        
+
+        if self.config.get('support_model', {}).get('enable', False):
+            BrainClass = self.role_worker_mapping[Role.SupportedModel]
+            brain_pool = self.resource_pool_manager.get_resource_pool(Role.SupportedModel)
+            self.brain_actor = BrainClass.options(
+                name="UnifiedBrain"
+            ).remote(self.config)
+
+            ray.get(self.brain_actor.init_model.remote())
+
+        if self.config.support_model.enable and self.config.support_model.planner.enable : #adding planner
+            self.planner = ray.get_actor("UnifiedBrain")
+
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`. Instead, directly pass different resource pool to different worker groups.
@@ -666,6 +693,8 @@ class RayPPOTrainer(object):
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            if not class_dict:
+                continue
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool,
                                                 ray_cls_with_init=worker_dict_cls,
@@ -844,12 +873,17 @@ class RayPPOTrainer(object):
         
         if self.config.trainer.render:
             
-            obs, info = self.env.reset()
+            obs,plan_obs, info = self.env.reset()
             images = self.env.render()
             all_imgs = [[img] for img in images]
             
             episode_done = np.zeros(self.config.envs.n_rollouts, dtype=np.bool_)
-            max_seq_len = self.config.data.max_prompt_length
+            
+            plan_len =  0
+            if self.config.support_model.enable and self.config.support_model.planner.enable:
+                    plan_len = self.config.support_model.planner.max_plan_length
+                
+            max_seq_len = self.config.data.max_prompt_length + plan_len # TODO: query from config
             
             while not np.all(episode_done):
                 
@@ -874,7 +908,7 @@ class RayPPOTrainer(object):
                 response_ids = gen_batch_output.batch['responses']
                 actions = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
                 
-                obs, reward, terminated, truncated, info = self.env.step(actions)
+                obs, plan_obs, reward, terminated, truncated, info = self.env.step(actions)
                 images = self.env.render()
                 for i in range(len(images)):
                     if not episode_done[i]:
@@ -897,8 +931,7 @@ class RayPPOTrainer(object):
                     loop=0  # 0 means loop forever
                 )
         
-        obs, info = self.env.reset()
-        
+        obs,plan_obs, info = self.env.reset()
         for epoch in range(self.config.trainer.total_epochs):
             
                 self.critic_warmup_step = self.config.trainer.critic_warmup_step # TODO: move to the config file
@@ -911,10 +944,12 @@ class RayPPOTrainer(object):
                     esize = self.config.envs.n_rollouts
                     plen = self.config.data.max_prompt_length
                     rlen = self.config.data.max_response_length
+                    if self.config.support_model.enable and self.config.support_model.planner.enable:
+                        plen += self.config.support_model.planner.max_plan_length
                     batch_dict = {
-                        "input_ids": torch.zeros([bsize + esize, plen + rlen], dtype=torch.int64),
-                        "attention_mask": torch.zeros([bsize + esize, plen + rlen], dtype=torch.int64),
-                        "position_ids": torch.zeros([bsize + esize, plen + rlen], dtype=torch.int64),
+                        "input_ids": torch.zeros([bsize + esize, plen + rlen ], dtype=torch.int64),
+                        "attention_mask": torch.zeros([bsize + esize, plen + rlen ], dtype=torch.int64),
+                        "position_ids": torch.zeros([bsize + esize, plen + rlen ], dtype=torch.int64),
                         "responses": torch.zeros([bsize + esize, rlen], dtype=torch.int64),
                         "reward": torch.zeros([bsize + esize], dtype=torch.float64),
                         "done": torch.zeros([bsize + esize], dtype=torch.float64),
@@ -924,6 +959,7 @@ class RayPPOTrainer(object):
                         "extra_info": np.zeros([bsize]),
                         "raw_prompt_ids": np.zeros([bsize]),
                         "index": np.zeros([bsize]),
+                        "was_planned": np.zeros([bsize]),
                     }
         
                 metrics = {}
@@ -932,7 +968,11 @@ class RayPPOTrainer(object):
                 is_last_step = self.global_steps >= self.total_training_steps
                 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
-                max_seq_len = self.config.data.max_prompt_length # TODO: query from config
+                plan_len =  0
+                if self.config.support_model.enable and self.config.support_model.planner.enable:
+                        plan_len = self.config.support_model.planner.max_plan_length
+                
+                max_seq_len = self.config.data.max_prompt_length+plan_len # TODO: query from config
                 
                 with _timer('step', timing_raw):
 
@@ -942,10 +982,20 @@ class RayPPOTrainer(object):
                     
                     if self.global_steps == 1 or self.global_steps > self.critic_warmup_step:
                         
+
                         for time_step in range(episode_len+1):
-                            
+                            if self.config.support_model.enable and self.config.support_model.planner.enable:
+                                frequency = self.config.support_model.planner.frequency
+                                if time_step % frequency == 0:
+                                    futures = self.planner.generate_plan.remote(list(plan_obs))
+                                    obs, plans = ray.get(futures)
+                                    cached_plans = plans
+                                else:
+                                     obs = [o + p for o, p in zip(obs, cached_plans)]
                             # TODO: move this to a function 
                             
+
+
                             self.tokenizer.padding_side = "left"
                             input_obs = self.tokenizer.apply_chat_template(obs, tokenize=False, add_generation_prompt=True) #, enable_thinking=True)
                             
@@ -978,7 +1028,7 @@ class RayPPOTrainer(object):
                             response_ids = gen_batch_output.batch['responses']
                             actions = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
                             
-                            obs, reward, terminated, truncated, info = self.env.step(actions)
+                            obs,plan_obs, reward, terminated, truncated, info = self.env.step(actions)
                             
                             done = np.logical_or(terminated, truncated)
                             
@@ -1057,7 +1107,15 @@ class RayPPOTrainer(object):
                         batch.batch['token_level_rewards'] = torch.zeros_like(batch.batch['response_mask'], dtype=torch.float64)
                         seq_len = batch.batch['response_mask'].sum(-1) - 1
                         indices = torch.arange(batch.batch['response_mask'].shape[0], device=seq_len.device)
-                        batch.batch['token_level_rewards'][indices, seq_len] = batch.batch['reward']
+
+                        if self.config.support_model.judge.enable and self.config.reward_model.reward_manager == 'bridge':
+                            batch.batch['token_level_rewards'] = self.reward_fn(batch)
+                            total_rewards = batch.batch['token_level_rewards'][indices, seq_len]
+                            batch.batch['reward'] = total_rewards
+
+                        else:
+                            batch.batch['token_level_rewards'][indices, seq_len] = batch.batch['reward']
+                        
                         batch.batch['token_level_scores'] = batch.batch['token_level_rewards'].clone() 
                         if self.config.algorithm.use_kl_in_reward:
                             batch, kl_metrics = apply_kl_penalty(batch,

@@ -2,7 +2,7 @@ from .history import HistoryPromptBuilder
 
 import warnings
 
-def create_prompt_builder(config):
+def create_prompt_builder(config, support_model):
     """
     Creates an instance of a prompt builder based on the provided configuration.
     This function initializes a prompt builder by extracting relevant configuration
@@ -26,9 +26,16 @@ def create_prompt_builder(config):
     max_text_history = max_history
     if max_text_history is None:
         max_text_history = config.max_text_history
+    max_planner_history =0
+    
+    print(f"Support model config: {support_model}")
+    print("is planner enabled: ",support_model.planner.enable)
+    if support_model.enable and support_model.planner.enable:
+        max_planner_history = support_model.planner.get("max_history", 16)
 
     return HistoryPromptBuilder(
         max_text_history=max_text_history,
         max_image_history=config.max_image_history,
         max_cot_history=config.max_cot_history,
+        max_planner_history=max_planner_history,
     )

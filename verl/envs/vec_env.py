@@ -59,17 +59,17 @@ class VecEnv:
         for remote, action in zip(self.remotes, actions):
             remote.send(('step', action))
         results = [remote.recv() for remote in self.remotes]
-        obs, rews, terminated, truncated, infos = zip(*results)
+        obs, plan_obs, rews, terminated, truncated, infos = zip(*results)
         
         infos = merge_metrics(infos)
         
-        return obs, np.stack(rews), np.stack(terminated), np.stack(truncated), infos
+        return obs, plan_obs, np.stack(rews), np.stack(terminated), np.stack(truncated), infos
     
     def reset(self):
         for remote in self.remotes:
             remote.send(('reset', None))
-        observations, infos = zip(*[remote.recv() for remote in self.remotes])
-        return observations, infos
+        obs, plan_obs, infos = zip(*[remote.recv() for remote in self.remotes])
+        return obs, plan_obs, infos
     
     def render(self):
         for remote in self.remotes:
@@ -102,7 +102,8 @@ def worker(rank, remote, parent_remote, env_name, env_fn_wrapper, captioner_fn_w
         captioner.prompt_builder.update_instruction_prompt(inst_prompt)
         captioner.update_action(full_action, executed_action)
         info["metrics"] = metrics
-        return captioner.get_obs(env_obs), reward, terminated, truncated, info, image
+        prompts,plan_prompts = captioner.get_obs(env_obs)
+        return prompts, plan_prompts, reward, terminated, truncated, info, image
 
     def env_reset():
         captioner.reset()
@@ -111,18 +112,19 @@ def worker(rank, remote, parent_remote, env_name, env_fn_wrapper, captioner_fn_w
         instructions = env_obs["mission"]  if env_name == "babyai" else None
         inst_prompt = env.get_instruction_prompt(instructions=instructions)
         captioner.prompt_builder.update_instruction_prompt(inst_prompt)
-        return captioner.get_obs(env_obs), info, image
+        prompts, plan_prompts = captioner.get_obs(env_obs)
+        return prompts, plan_prompts, info, image
         
     while True:
         cmd, data = remote.recv()
         if cmd == 'step':
-            obs, reward, terminated, truncated, info, image = env_step(data)
+            obs,plan_obs, reward, terminated, truncated, info, image = env_step(data)
             if terminated or truncated:
-                obs, _, image = env_reset()
-            remote.send((obs, reward, terminated, truncated, info))
+                obs,plan_obs, _, image = env_reset()
+            remote.send((obs,plan_obs, reward, terminated, truncated, info))
         elif cmd == 'reset':
-            obs, info, image = env_reset()
-            remote.send((obs, info))
+            obs,plan_obs, info, image = env_reset()
+            remote.send((obs,plan_obs, info))
         elif cmd == 'render':
             remote.send(image)
         elif cmd == 'close':

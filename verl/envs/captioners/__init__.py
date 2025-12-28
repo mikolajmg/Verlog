@@ -9,7 +9,7 @@ def make_captioner(config):
     Returns:
         Agent: An instance of the selected agent type, configured with the client and prompt builder.
     """
-    prompt_builder = create_prompt_builder(config.envs.captioner)
+    prompt_builder = create_prompt_builder(config.envs.captioner,config.support_model)
     env_name = config.envs.env_name
 
     if config.envs.captioner.type == "naive":

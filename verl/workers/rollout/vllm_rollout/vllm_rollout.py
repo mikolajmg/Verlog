@@ -92,7 +92,7 @@ class vLLMRollout(BaseRollout):
             "model context length should be greater than total sequence length"
 
         max_model_len = self.config.max_model_len if self.config.max_model_len \
-                        else config.prompt_length + config.response_length
+                        else config.prompt_length + config.response_length + config.support_model.planner.max_plan_length
         max_model_len = int(max_model_len)
         quantization = config.get('quantization', None)
 

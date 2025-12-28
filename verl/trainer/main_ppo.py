@@ -122,6 +122,7 @@ class TaskRunner:
         }
 
         global_pool_id = 'global_pool'
+        supported_model_pool_id = 'supported_model_pool'
         resource_pool_spec = {
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         }
@@ -130,6 +131,14 @@ class TaskRunner:
             Role.Critic: global_pool_id,
         }
 
+
+        if config.support_model.enable: # Changing assigned worker structures
+            from verl.workers.planner_judge import SupportedModelWorker
+            role_worker_mapping[Role.SupportedModel] = SupportedModelWorker
+            mapping[Role.SupportedModel] = supported_model_pool_id
+            resource_pool_spec[supported_model_pool_id] = [1]  # single GPU for supported model worker
+            resource_pool_spec[global_pool_id][-1] = config.trainer.n_gpus_per_node - 1  # leave one GPU for supported model worker
+
         # we should adopt a multi-source reward function here
         # - for rule-based rm, we directly call a reward score
         # - for model-based rm, we call a model
@@ -137,14 +146,21 @@ class TaskRunner:
         # - finally, we combine all the rewards together
         # - The reward type depends on the tag of the data
         if config.reward_model.enable:
-            if config.reward_model.strategy == 'fsdp':
+            if config.reward_model.strategy == 'bridge':
+                # Importujemy Twój lekki worker (klienta)
+                pass
+
+            elif config.reward_model.strategy == 'fsdp':
                 from verl.workers.fsdp_workers import RewardModelWorker
+                role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
+                mapping[Role.RewardModel] = global_pool_id
             elif config.reward_model.strategy == 'megatron':
                 from verl.workers.megatron_workers import RewardModelWorker
+                role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
+                mapping[Role.RewardModel] = global_pool_id
             else:
                 raise NotImplementedError
-            role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
-            mapping[Role.RewardModel] = global_pool_id
+            
 
         #use reference model
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
@@ -164,6 +180,10 @@ class TaskRunner:
         elif reward_manager_name == 'dapo':
             from verl.workers.reward_manager import DAPORewardManager
             reward_manager_cls = DAPORewardManager
+
+        elif reward_manager_name == 'bridge':
+            from verl.workers.bridge import BridgeRewardManager
+            reward_manager_cls = BridgeRewardManager
         else:
 
             raise NotImplementedError
@@ -171,7 +191,6 @@ class TaskRunner:
         compute_score = get_custom_reward_fn(config)
         reward_kwargs = dict(config.reward_model.get("reward_kwargs", {}))
         reward_fn = reward_manager_cls(tokenizer=tokenizer,
-                                       num_examine=0,
                                        compute_score=compute_score,
                                        reward_fn_key=config.data.reward_fn_key,
                                        **reward_kwargs)

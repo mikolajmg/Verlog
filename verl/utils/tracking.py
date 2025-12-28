@@ -188,6 +188,19 @@ class ValidationGenerationsLogger:
         if 'mlflow' in loggers:
             self.log_generations_to_mlflow(samples, step)
 
+        if 'console' in loggers:
+            self.log_generations_to_console(samples, step)
+
+    def log_generations_to_console(self, samples, step):
+        """Log samples to console"""
+        print(f"\n{'='*20} Validation Generations (Step {step}) {'='*20}")
+        for i, sample in enumerate(samples):
+            print(f"--- Sample {i+1} ---")
+            print(f"Input: {sample[0]}")
+            print(f"Output: {sample[1]}")
+            print(f"Score: {sample[2]}")
+        print(f"{'='*60}\n")
+
     def log_generations_to_wandb(self, samples, step):
         """Log samples to wandb as a table"""
         import wandb

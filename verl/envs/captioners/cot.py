@@ -26,7 +26,7 @@ class COTCaptioner(BaseCaptioner):
         """
 
         self.prompt_builder.update_observation(obs)
-        messages = self.prompt_builder.get_prompt()
+        messages, plan_messages = self.prompt_builder.get_prompt()
 
         # Add CoT-specific instructions to the prompt
         
@@ -52,7 +52,18 @@ class COTCaptioner(BaseCaptioner):
             content = message.content
             prompts.append({"role": role, "content": content})
 
-        return prompts
+
+        #plan_messages[-1].content += "\n\n" + cot_instructions
+
+        # convert messages to dict format
+        plan_prompts = []
+        for message in plan_messages:
+            role = message.role
+            content = message.content
+            plan_prompts.append({"role": role, "content": content})
+
+
+        return prompts,plan_prompts
     
     def update_action(self, full_action, executed_action):
         self.prompt_builder.update_reasoning(full_action)

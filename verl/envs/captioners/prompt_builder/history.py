@@ -27,12 +27,15 @@ class HistoryPromptBuilder:
         max_image_history: int = 1,
         system_prompt: Optional[str] = None,
         max_cot_history: int = 1,
+        max_planner_history: int = 16,
     ):
+        self.max_planner_history = max_planner_history
         self.max_text_history = max_text_history
         self.max_image_history = max_image_history
         self.max_history = max(max_text_history, max_image_history)
         self.system_prompt = system_prompt
         self._events = deque(maxlen=self.max_history * 2 + 1)  # Store n actions and n+1 observations
+        self._events_planner = deque(maxlen=self.max_planner_history * 2 + 1) 
         self._last_short_term_obs = None  # To store the latest short-term observation
         self.previous_reasoning = None
         self.max_cot_history = max_cot_history
@@ -57,10 +60,25 @@ class HistoryPromptBuilder:
                 "image": image,
             }
         )
+        self._events_planner.append(
+            {
+                "type": "observation",
+                "text": text,
+                "image": image,
+            }
+        )
 
     def update_action(self, action: str):
         """Add an action to the prompt history, including reasoning if available."""
         self._events.append(
+            {
+                "type": "action",
+                "action": action,
+                "reasoning": self.previous_reasoning,
+            }
+        )
+        
+        self._events_planner.append(
             {
                 "type": "action",
                 "action": action,
@@ -75,7 +93,7 @@ class HistoryPromptBuilder:
     def reset(self):
         """Clear the event history."""
         self._events.clear()
-
+        self._events_planner.clear()
     def get_prompt(self, icl_episodes=False) -> List[Message]:
         """Generate a list of Message objects representing the prompt.
 
@@ -151,4 +169,74 @@ class HistoryPromptBuilder:
                 message = Message(role="assistant", content=content)
             messages.append(message)
 
-        return messages
+        
+        messages_plan = []
+
+        if self.system_prompt and not icl_episodes:
+            messages_plan.append(Message(role="system", content=self.system_prompt))
+
+        # Determine which text observations to include
+        text_needed = self.max_planner_history + 1
+        for event in reversed(self._events_planner):
+            if event["type"] == "observation":
+                if text_needed > 0 and event.get("text") is not None:
+                    event["include_text"] = True
+                    text_needed -= 1
+                else:
+                    event["include_text"] = False
+
+        # Determine which image observations to include
+        images_needed = self.max_image_history
+        for event in reversed(self._events_planner):
+            if event["type"] == "observation":
+                if images_needed > 0 and event.get("image") is not None:
+                    event["include_image"] = True
+                    images_needed -= 1
+                else:
+                    event["include_image"] = False
+
+        # determine the reasoning to include
+        reasoning_needed = self.max_cot_history
+        for event in reversed(self._events_planner):
+            if event["type"] == "action":
+                if reasoning_needed > 0 and event.get("reasoning") is not None:
+                    reasoning_needed -= 1
+                else:
+                    event["reasoning"] = None
+
+        # Process events to create messages
+        for idx, event in enumerate(self._events_planner):
+            if event["type"] == "observation":
+                message_parts = []
+
+                if idx == len(self._events_planner) - 1:
+                    message_parts.append("Current Observation:")
+                    if self._last_short_term_obs:
+                        message_parts.append(self._last_short_term_obs)
+                else:
+                    message_parts.append("Observation:")
+
+                if event.get("include_text", False):
+                    message_parts.append(event["text"])
+                    
+                image = None
+                if event.get("include_image", False):
+                    image = event["image"]
+                    message_parts.append("Image observation provided.")
+
+                content = "\n".join(message_parts)
+                message = Message(role="user", content=content, attachment=image)
+
+                # Clean up temporary flags
+                for flag in ["include_text", "include_image"]:
+                    if flag in event:
+                        del event[flag]
+            elif event["type"] == "action":
+                if event.get("reasoning") is not None:
+                    content = "Previous plan:\n" + event["reasoning"]
+                else:
+                    content = event["action"]
+                message = Message(role="assistant", content=content)
+            messages_plan.append(message)
+        
+        return messages, messages_plan
