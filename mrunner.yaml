@@ -1,0 +1,19 @@
+contexts:
+  helios_gpu:
+    account: plgbro4ppo-gpu-gh200
+    backend_type: slurm
+    cmd_type: sbatch
+    modules_to_load:
+      - ML-bundle/24.06a
+      - ml GCCcore/13.2.0 Python/3.11.5
+      - ml CUDA/12.8.0
+    cpu: 16
+    mem: 128G
+    gpu: 1
+    nodes: 1
+    ntasks: 1
+    partition: plgrid-gpu-gh200
+    venv: /net/scratch/hscra/plgrid/plgmikolajg/Verlog/.venv4
+    slurm_url: plgmikolajg@login01.helios.cyfronet.pl
+    storage_dir: /net/scratch/hscra/plgrid/plgmikolajg
+    time: 2880
