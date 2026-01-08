@@ -184,6 +184,7 @@ reward_model:
   reward_manager: naive # reward manager llm_judge to create llm
   reward_kwargs:
     num_examine: 5
+  n_rollouts: ${envs.n_rollouts}
     
     
 

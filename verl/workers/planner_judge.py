@@ -1,7 +1,7 @@
 import ray
 from vllm import LLM, SamplingParams, TokensPrompt
 import re
-
+import time
 
 
 @ray.remote(num_gpus=1)
@@ -60,10 +60,9 @@ class SupportedModelWorker:
             return matches[-1].strip() if matches else None
 
         COT_START_MARKER = "What will you do next?"
-        PLAN_INSTRUCTION = """
-Review your previous observations and current situation, then create a focused plan for the next steps.
-Your plan should identify the immediate goal and approach.
-
+        PLAN_INSTRUCTION = f"""
+Review your previous observations and current situation, then create a focused plan what to do next.
+Your plan must identify the immediate goal and what would be the outcome.
 Output in exactly this format:
 <plan>Your plan here</plan>
 """
@@ -97,8 +96,6 @@ Output in exactly this format:
         
         outputs = self.llm.generate(prompts, sampling_params,use_tqdm=False)
         
-        #print(f"[UnifiedBrain] Generating plans for {len(prompts)} prompts.")
-        #print(f"[UnifiedBrain] Sample output: {outputs[0].outputs[0].text.strip()}")
         obs_augmented = []
         plan_messages = []
         for history, plan in zip(observation_prompts, outputs):
@@ -106,12 +103,11 @@ Output in exactly this format:
             extracted_plan = extract_plan(generated_text)
             if extracted_plan:
                 generated_text = extracted_plan[:self.config.support_model.planner.max_plan_length]
-                #print(f"[UnifiedBrain] Extracted plan: {generated_text}")
             else:
                 print(f"[UnifiedBrain] Warning: No plan found in output: {generated_text}")
                 generated_text  =generated_text[-self.config.support_model.planner.max_plan_length:] 
             plan_message = {
-                "role": "user", 
+                "role": "system", 
                 "content": "Here is a plan for your upcoming turns. Please try to follow it:\n\n"+ generated_text
             }
             
@@ -122,54 +118,89 @@ Output in exactly this format:
         return obs_augmented,plan_messages
         
 
-    def evaluate_reward(self, judge_prompts: list[str]) -> list[float]:
-        
+    
+    def evaluate_reward(self, judge_payloads: list[dict]) -> list[float]:
+        if not judge_payloads:
+            return []
+
+        formatted_prompts = [self._construct_judge_prompt(p) for p in judge_payloads]
+
         sampling_params = SamplingParams(
             temperature=0.0,
-            max_tokens=100, 
+            max_tokens=15000, 
+            stop=["###", "\n\n\n"] 
         )
-        
-        
 
-        formatted_prompts = []
-        if len(judge_prompts) > 0:
-            first_item = judge_prompts[0]
-            
-            # Check if the input is a list of integers (Token IDs)
-            if isinstance(first_item, list) and len(first_item) > 0 and isinstance(first_item[0], int):
-                print("[UnifiedBrain] Detected Token IDs. Wrapping in TokensPrompt.")
-                for p in judge_prompts:
-                    formatted_prompts.append(TokensPrompt(prompt_token_ids=p))
-            else:
-                # Assume it is already a string or correct format
-                print(f"[UnifiedBrain] Sample prompt type: {type(first_item)}")
-                formatted_prompts = judge_prompts
-        else:
-            formatted_prompts = []
-        
-        print(f"[UnifiedBrain] Sample prompt: {formatted_prompts[0]}")
-        outputs = self.llm.generate(formatted_prompts, sampling_params,use_tqdm=False)
-        
+
+        outputs = self.llm.generate(formatted_prompts, sampling_params, use_tqdm=False)
         scores = []
-        for output in outputs:
-            #print(f"[UnifiedBrain] Raw Judge Output: {output.outputs[0].text.strip()}")
-            text_response = output.outputs[0].text.strip()
-            score = self._parse_score(text_response)
+        
+        for i, output in enumerate(outputs):
+            prompt_text = formatted_prompts[i]
+            response_text = output.outputs[0].text.strip()
+            score = self._parse_score(response_text)
+            
+            
+            
             scores.append(score)
+        
         return scores
+
+    def _construct_judge_prompt(self, payload: dict) -> str:
+        
+        observations = payload.get("observations", [])
+        plan = payload.get("plans", "")
+
+        history_text = ""
+        if not observations:
+            history_text = "No prior observations (Start of task)."
+        else:
+            for i, obs in enumerate(observations):
+                
+                clean_obs = str(obs).strip()
+                history_text += f"Step {i+1} Observation:\n{clean_obs}\n\n"
+
+        prompt = f"""### Instruction
+You are an expert critic of reasoning trajectories. Your goal is to validate if a set of actions is logical and consistent with a created plan.
+The plan is a short description of intended actions to achieve a goal and it also has intended outcome after execution.  
+Execution history contains observations and actions made by an actor which was given specific prompt that you can see in the first and last observation. You also get to see intermediate actions taken.
+### Proposed  Plan
+"{plan}"
+### Execution History
+{history_text}
+
+
+### Evaluation Criteria
+1. **Consistency**: The actions must not contradict plan.
+2. ** Relevance**: The actions must contribute towards achieving the plan's goal.
+
+### Task
+Evaluate the Proposed set of actions are:
+- logical and follow strictly a plan, classify it as **GOOD**.
+- hallucinations or nonsensical, classify it as **BAD**.
+
+### Output Format
+Provide a short reasoning sentence, followed by the final result enclosed in double brackets on the last line.
+Example:
+The plan logic is sound and follows the previous observation because agent gathered wood and it got wood in the inventory.
+[[GOOD]]
+
+### Response
+"""
+        return prompt
+
 
     def _parse_score(self, text: str) -> float:
         try:
-            match = re.search(r"[-+]?\d*\.\d+|\d+", text)
-            if match:
-                val = float(match.group())
-                if val > 1.0: val = val / 10.0
-                return max(0.0, min(1.0, val))
+            text = text.upper().strip()
+            if "[[GOOD]]" in text: return 1.0
+            if "[[BAD]]" in text:  return 0.0
             
-            lower_text = text.lower()
-            if "yes" in lower_text or "good" in lower_text: return 1.0
-            if "no" in lower_text or "bad" in lower_text: return 0.0
+            last_line = text.split('\n')[-1]
+            if re.search(r'\bGOOD\b', last_line): return 1.0
+            if re.search(r'\bBAD\b', last_line):  return 0.0
+            
             return 0.0
         except Exception as e:
-            print(f"[UnifiedBrain] Error in parsing: '{text}': {e}")
+            print(f"[Judge] Parsing Error: {e}")
             return 0.0

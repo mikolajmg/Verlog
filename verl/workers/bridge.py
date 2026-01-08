@@ -4,45 +4,39 @@ from verl import DataProto
 from collections import defaultdict
 
 class BridgeRewardManager:
-    """
-    BridgeRewardManager zastępuje NaiveRewardManager.
-    Zamiast liczyć nagrodę lokalnie funkcją pythonową, wysyła dane do UnifiedBrain (Ray Actor).
-    Realizuje logikę: Total Reward = Env Reward + (LLM Reward if active else 0).
-    """
-
-    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key='data_source', **kwargs) -> None:
+    """ Bridge Reward Manager integrating LLM-based judgment into reward calculation. """
+    def __init__(self, tokenizer, num_examine, compute_score=None ,reward_fn_key='data_source',config=None, **kwargs) -> None:
         self.tokenizer = tokenizer
-        self.num_examine = num_examine
+        self.judge_freq = num_examine
         self.reward_fn_key = reward_fn_key
-        
-        self.judge_enabled = kwargs.get('judge_enable', True)
-        self.judge_freq = kwargs.get('judge_frequency', 1)
-        
+        self.kwargs = kwargs
+        self.judge_enabled = config.support_model.judge.enable
+        #self.judge_freq = kwargs.get('reward_kwargs', {}).get('judge_frequency', 5)
+        #self.judge_freq = self.judge_freq['judge_frequency']
+        self.n_rollouts = config.reward_model.n_rollouts
+
         self.step_counter = 0
         self.brain = None
-        print(f"[BridgeManager] Initialized. Judge Enabled: {self.judge_enabled}, Freq: {self.judge_freq}")
 
+        self.config = kwargs.get('config', None)
+        
     def __call__(self, data: DataProto, return_dict=False):
-        """
-        Główna pętla wywoływana przez RayPPOTrainer.fit()
-        """
-        self.step_counter += 1
-        
-        # 1. Przygotowanie tensora wyjściowego (tak samo jak w Naive)
-        # Kształt: [batch_size, response_length]
-        reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
-        
-        # 2. Pobranie nagrody ze środowiska (Environment Reward)
-        # RayPPOTrainer/RolloutWorker zapisał nagrodę z gry w data.batch['reward']
-        # Kształt: [batch_size]
+        print(f"[BridgeManager] kwargs received: {self.kwargs}")
         env_rewards = data.batch['reward']
-        batch_size = env_rewards.shape[0]
-        device = env_rewards.device
-
-        # 3. Obliczenie nagrody LLM (Judge)
-        llm_scores = torch.zeros_like(env_rewards) # Domyślnie zera
         
-        should_judge = (self.judge_enabled and (self.step_counter % self.judge_freq == 0))
+        dones = data.batch['done'].to(torch.bool) 
+        
+        batch_size = env_rewards.shape[0]
+        n_envs = self.n_rollouts
+        num_steps = batch_size // n_envs
+        device = env_rewards.device
+        
+        reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
+        llm_scores_flat = torch.zeros(batch_size, device=device)
+        
+
+        
+        
 
         
         if self.brain is None:
@@ -51,17 +45,94 @@ class BridgeRewardManager:
             except Exception as e:
                 print(f"[BridgeManager] Warning: UnifiedBrain not found: {e}")
 
-        if self.brain:
-            # Pobieramy pełne input_ids (Prompt + Response)
+        should_judge = (self.judge_enabled and (self.step_counter % self.judge_freq == 0))
+        if self.brain and should_judge:
+            
             input_ids = data.batch['input_ids']
-            input_ids_list = input_ids.tolist()
+            responses = data.batch['responses']
+            plans = data.batch['plan']
+            dones = data.batch['done']
+            
+            plans_decoded = self.tokenizer.batch_decode(plans, skip_special_tokens=True)
+            inputs = self.tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+            responses = self.tokenizer.batch_decode(responses, skip_special_tokens=True)
+            
+
+            
+
+            batch_indices = []
+            payloads = []
+            for env_i in range(n_envs):
+                
+                
+                observations=[]
+                current_plan=set()
+                diff_plan=False
+                turns_to_judge = self.judge_freq
+                steps_indices = [step * n_envs + env_i for step in range(num_steps)]
+                for step in steps_indices:
+                    # print(f"[BridgeManager] Decoded plan sample: {plans_decoded[step]}")
+                    # print(f"[BridgeManager] Decoded obs sample: {inputs[step]}")
+                    
+                    if plans_decoded[step] not in current_plan and len(current_plan)>0:
+                        
+                        diff_plan = True
+
+                    is_done = dones[step]
+                    is_limit = (turns_to_judge == 1)
+                    is_last = (step == len(steps_indices) - 1)
+                    # we ensure we get full observations for the last step and first step
+                    
+                    if (is_done or is_limit or is_last or turns_to_judge == self.judge_freq) and not diff_plan:
+                        
+                        observations.append(inputs[step])
+                        current_plan.update({plans_decoded[step]})
+                    elif not diff_plan:
+                        
+                        observations.append(responses[step])
+                        current_plan.update({plans_decoded[step]})
+
+                    
+                    turns_to_judge -= 1
+                    if is_done or is_limit or is_last or diff_plan:
+                        assert len(set(current_plan))==1,  f"all plans should be the same in this but are:  {observations,current_plan}"
+                        payload = {
+                            "observations": observations,
+                            "plans": set(current_plan).pop(),
+                        }
+                        # history_text = " \n\n\n___________________________________________\n NEXT OBSERVATION:".join(observations)
+                        # print(f"""Plan to evaluate:{plans_decoded[step]} 
+                        
+                        # for observations  
+                        
+                        # {history_text}
+                        
+                        # """)
+                        # history_plan = " \n\n\n___________________________________________\n NEXT PLAN:".join(current_plan)
+                        # print(f"[BridgeManager] The plans that are being sent to judge: {history_plan}")
+
+                        turns_to_judge=self.judge_freq
+                        payloads.append(payload)
+                        batch_indices.append(step)
+                        current_plan=set()
+                        observations=[]
+                        diff_plan=False
+                        if diff_plan:
+                            observations.append(inputs[step])
+                            current_plan.update({plans_decoded[step]})
+                            diff_plan=False
+                    
+                        
+            
 
             try:
                 
-                futures = self.brain.evaluate_reward.remote(input_ids_list)
+                futures = self.brain.evaluate_reward.remote(payloads)
                 scores_list = ray.get(futures)
-                
-                llm_scores = torch.tensor(scores_list, device=device, dtype=torch.float32)
+                print(f"[BridgeManager] LLM Scores received: {mean(scores_list)}")
+                for idx, score in zip(batch_indices, scores_list):
+                    llm_scores_flat[idx] = score
+                #llm_scores = torch.tensor(scores_list, device=device, dtype=torch.float32)
                 # print(f"[BridgeManager] LLM Scores computed.")
                 # print(f"[BridgeManager] LLM Scores Tensor: {llm_scores}")
                 # Logowanie kilku przykładów dla pewności
@@ -71,16 +142,10 @@ class BridgeRewardManager:
             except Exception as e:
                 print(f"[BridgeManager] Error calculating LLM reward: {e}")
         
-        # 4. Sumowanie: Final Score = Environment + LLM
-        # Jeśli Judge był wyłączony (skipped), llm_scores to same zera, więc zostaje Environment.
-        total_scores = env_rewards + llm_scores
 
-        # 5. Mapowanie wyniku do tensora sekwencji (Sparse Tensor)
-        # NaiveRewardManager umieszcza nagrodę na ostatnim tokenie odpowiedzi.
+        total_scores = env_rewards + llm_scores_flat
+
         
-        # Obliczamy długość poprawnej odpowiedzi (maska)
-        # Responses to [Batch, Resp_Len]
-        print(f"[BridgeManager] Batch keys: ")
         
         
         responses = data.batch['responses']
@@ -101,15 +166,12 @@ class BridgeRewardManager:
             if last_token_idx < 0: 
                 last_token_idx = 0
             
-            # Wpisujemy ZSUMOWANĄ nagrodę w odpowiednie miejsce
             reward_tensor[i, last_token_idx] = total_scores[i]
 
-        # 6. Zwracanie wyniku (format zgodny z Naive)
         if return_dict:
             return {
                 "reward_tensor": reward_tensor,
-                # Opcjonalnie możemy zwrócić szczegóły do logowania
-                "reward_extra_info": defaultdict(list, {"llm_score": llm_scores.tolist(), "env_score": env_rewards.tolist()}) 
+                "reward_extra_info": defaultdict(list, {"llm_score": llm_scores_flat.tolist(), "env_score": env_rewards.tolist()}) 
             }
         else:
             return reward_tensor

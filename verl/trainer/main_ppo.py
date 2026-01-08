@@ -193,12 +193,14 @@ class TaskRunner:
         reward_fn = reward_manager_cls(tokenizer=tokenizer,
                                        compute_score=compute_score,
                                        reward_fn_key=config.data.reward_fn_key,
+                                       config=config,
                                        **reward_kwargs)
 
         # Note that we always use function-based RM for validation
         val_reward_fn = reward_manager_cls(tokenizer=tokenizer,
                                            num_examine=1,
                                            compute_score=compute_score,
+                                           config=config,
                                            reward_fn_key=config.data.reward_fn_key)
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 

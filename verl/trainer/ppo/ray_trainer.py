@@ -568,10 +568,11 @@ class RayPPOTrainer(object):
                 frequency = self.config.support_model.planner.frequency
                 if counter % frequency == 0:
                     futures = self.planner.generate_plan.remote(list(val_plan_obs))
-                    val_obs, plans = ray.get(futures)
+                    _, plans = ray.get(futures)
                     cached_plans = plans
-                else:
-                    val_obs = [o + p for o, p in zip(val_obs, cached_plans)]
+
+                
+                val_obs = [o + p for o, p in zip(val_obs, cached_plans)]
             self.tokenizer.padding_side = "left"
             val_input_obs_text = self.tokenizer.apply_chat_template(val_obs, tokenize=False, add_generation_prompt=True) #, enable_thinking=True)
             sample_inputs.extend(val_input_obs_text)
@@ -588,13 +589,6 @@ class RayPPOTrainer(object):
             }
             val_gen_batch = DataProto.from_dict(tensors=val_obs_data)
             
-            # val_gen_batch.meta_info = {
-            #     'eos_token_id': self.tokenizer.eos_token_id,
-            #     'pad_token_id': self.tokenizer.pad_token_id,
-            #     'recompute_log_prob': False,
-            #     'do_sample': self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
-            #     'validate': True,
-            # }
             
             val_gen_batch.meta_info["step"] = None
             val_gen_batch_output = self.actor_rollout_wg.generate_sequences(val_gen_batch)
@@ -909,6 +903,7 @@ class RayPPOTrainer(object):
                 actions = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
                 
                 obs, plan_obs, reward, terminated, truncated, info = self.env.step(actions)
+                print("INFO rewards: ", info)
                 images = self.env.render()
                 for i in range(len(images)):
                     if not episode_done[i]:
@@ -959,7 +954,7 @@ class RayPPOTrainer(object):
                         "extra_info": np.zeros([bsize]),
                         "raw_prompt_ids": np.zeros([bsize]),
                         "index": np.zeros([bsize]),
-                        "was_planned": np.zeros([bsize]),
+                        "plan":torch.zeros([bsize + esize,self.config.support_model.planner.max_plan_length], dtype=torch.int64),
                     }
         
                 metrics = {}
@@ -988,10 +983,25 @@ class RayPPOTrainer(object):
                                 frequency = self.config.support_model.planner.frequency
                                 if time_step % frequency == 0:
                                     futures = self.planner.generate_plan.remote(list(plan_obs))
-                                    obs, plans = ray.get(futures)
-                                    cached_plans = plans
+                                    _ , plans = ray.get(futures)
+                                    obs = [o + p for o, p in zip(obs, plans)]
+
+                                    if self.config.support_model.enable and self.config.support_model.planner.enable and self.config.support_model.judge.enable:
+                                        
+                                        plan_tokenized = [plan[0]["content"] for plan in plans]
+                                        plan_tokenized= self.tokenizer(plan_tokenized, return_tensors='pt', padding='max_length', truncation=True, max_length=self.config.support_model.planner.max_plan_length)
+                                        plan_tokenized=plan_tokenized['input_ids']
+                                        plans_detokenized = self.tokenizer.batch_decode(plan_tokenized, skip_special_tokens=True)
+                                        
                                 else:
-                                     obs = [o + p for o, p in zip(obs, cached_plans)]
+                                    obs = [o + p for o, p in zip(obs, plans)]
+                                    
+                                    if self.config.support_model.enable and self.config.support_model.planner.enable and self.config.support_model.judge.enable:
+                                        plan_tokenized = [plan[0]["content"] for plan in plans]
+                                        
+                                        plan_tokenized= self.tokenizer(plan_tokenized, return_tensors='pt', padding='max_length', truncation=True, max_length=self.config.support_model.planner.max_plan_length)
+                                        plan_tokenized=plan_tokenized['input_ids']
+                                     
                             # TODO: move this to a function 
                             
 
@@ -1011,6 +1021,9 @@ class RayPPOTrainer(object):
                                 'attention_mask': attention_mask,
                                 'position_ids': position_ids,
                             }
+                            if self.config.support_model.enable and self.config.support_model.planner.enable and self.config.support_model.judge.enable:
+                                obs_data['plan'] = plan_tokenized
+                                
                             gen_batch = DataProto.from_dict(tensors=obs_data)
                             
                             if time_step == episode_len:
@@ -1040,7 +1053,8 @@ class RayPPOTrainer(object):
                             
                             gen_batch_output.batch["done"] = done # TODO: check correctness
                             gen_batch_output.batch["reward"] = reward
-                            
+                            if 'plan' in obs_data:
+                                gen_batch_output.batch['plan'] = obs_data['plan']
                             batch.insert(
                                 gen_batch_output,
                                 start_idx = time_step * self.config.envs.n_rollouts,
@@ -1109,6 +1123,7 @@ class RayPPOTrainer(object):
                         indices = torch.arange(batch.batch['response_mask'].shape[0], device=seq_len.device)
 
                         if self.config.support_model.judge.enable and self.config.reward_model.reward_manager == 'bridge':
+                        
                             batch.batch['token_level_rewards'] = self.reward_fn(batch)
                             total_rewards = batch.batch['token_level_rewards'][indices, seq_len]
                             batch.batch['reward'] = total_rewards
