@@ -3,10 +3,13 @@ contexts:
     account: plgbro4ppo-gpu-gh200
     backend_type: slurm
     cmd_type: sbatch
+    sbatch_options:
+      - "--export=NONE"
     modules_to_load:
       - ML-bundle/24.06a
-      - ml GCCcore/13.2.0 Python/3.11.5
-      - ml CUDA/12.8.0
+      - Python/3.11.5
+      - CUDA/12.8.0
+      - SQLite/3.43.1
     cpu: 16
     mem: 128G
     gpu: 1
@@ -17,3 +20,18 @@ contexts:
     slurm_url: plgmikolajg@login01.helios.cyfronet.pl
     storage_dir: /net/scratch/hscra/plgrid/plgmikolajg
     time: 2880
+
+  Other_context:
+    account: plgbro4ppo
+    backend_type: slurm
+    cmd_type: sbatch
+    modules_to_load:
+      
+    cpu: 16
+    mem: 64G
+    gpu: 0
+    nodes: 1
+    ntasks: 1
+    partition: plgrid-short
+    venv: /net/scratch/hscra/plgrid/plgmikolajg/Verlog/.venv4
+    slurm_url:
