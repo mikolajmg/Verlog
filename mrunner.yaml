@@ -17,7 +17,7 @@ contexts:
     ntasks: 1
     partition: plgrid-gpu-gh200
     venv: /net/scratch/hscra/plgrid/plgmikolajg/Verlog/.venv4
-    slurm_url: plgmikolajg@login01.helios.cyfronet.pl
+    slurm_url: helios
     storage_dir: /net/scratch/hscra/plgrid/plgmikolajg
     time: 2880
 

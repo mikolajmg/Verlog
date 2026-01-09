@@ -1,5 +1,8 @@
 import os
-
+from dotenv import load_dotenv
+import posixpath
+# This looks for the .env file and loads it into os.environ
+load_dotenv()
 from mrunner.helpers.specification_helper import create_experiments_helper
 
 name = globals()["script"][:-3]
@@ -49,7 +52,7 @@ experiments_list = create_experiments_helper(
     env={
         "WANDB_API_KEY": os.environ["WANDB_API_KEY"],
         #"HF_TOKEN": os.environ["HF_TOKEN"],
-        "HF_HOME": "$SCRATCH/huggingface",
+        "HF_HOME": posixpath.join(scratch,"huggingface"),
         "WANDB_ENTITY":"ideas-ncbr",
         "WANDB_MODE": "offline",
     },
