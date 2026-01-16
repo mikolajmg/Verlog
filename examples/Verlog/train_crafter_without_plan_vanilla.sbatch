@@ -3,14 +3,14 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
-#SBATCH --time=36:29:58
+#SBATCH --time=02:29:58
 #SBATCH --gres=gpu:2
 #SBATCH --account=plgbro4ppo-gpu-gh200
 #SBATCH --partition=plgrid-gpu-gh200
 #SBATCH --output=slurm/train_crafter_without_plan-%j.out
 
 
-ml purge
+
 ml ML-bundle/24.06a
 ml GCCcore/13.3.0
 #ml CUDA/12.8.0
@@ -32,16 +32,15 @@ set -e
 export WANDB_ENTITY="ideas-ncbr"
 export WANDB_MODE="offline"
 model=Qwen/Qwen2.5-1.5B-Instruct #Mohxx/helios-1.5B-sft # Qwen/Qwen2.5-1.5B-Instruct
-micro_batch_size=16
+micro_batch_size=8
 
 #export DISABLE_FLASH_ATTN=1
-#reward_model.strategy="bridge" \
 #CUDA_LAUNCH_BLOCKING=1
 PYTHONUNBUFFERED=1  python3 -m verl.trainer.main_ppo \
  data.max_prompt_length=3000  \
  data.max_response_length=512  \
- data.train_batch_size=512 \
- actor_rollout_ref.actor.ppo_mini_batch_size=128  \
+ data.train_batch_size=2048 \
+ actor_rollout_ref.actor.ppo_mini_batch_size=1024   \
  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$micro_batch_size \
  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$micro_batch_size \
  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=$micro_batch_size \
@@ -56,7 +55,7 @@ PYTHONUNBUFFERED=1  python3 -m verl.trainer.main_ppo \
  algorithm.step_lam=0.95 \
  algorithm.use_kl_in_reward=True \
  algorithm.kl_ctrl.kl_coef=0.001 \
- envs.n_rollouts=16 \
+ envs.n_rollouts=32 \
  envs.env_name=crafter \
  envs.task=default \
  envs.format_penalty=0.1 \

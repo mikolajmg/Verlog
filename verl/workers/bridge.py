@@ -2,6 +2,7 @@ import torch
 import ray
 from verl import DataProto
 from collections import defaultdict
+import numpy as np
 
 class BridgeRewardManager:
     """ Bridge Reward Manager integrating LLM-based judgment into reward calculation. """
@@ -21,7 +22,7 @@ class BridgeRewardManager:
         self.config = kwargs.get('config', None)
         
     def __call__(self, data: DataProto, return_dict=False):
-        print(f"[BridgeManager] kwargs received: {self.kwargs}")
+        plan_completion = {'plan_completion': 0.0}
         env_rewards = data.batch['reward']
         
         dones = data.batch['done'].to(torch.bool) 
@@ -86,11 +87,11 @@ class BridgeRewardManager:
                     if (is_done or is_limit or is_last or turns_to_judge == self.judge_freq) and not diff_plan:
                         
                         observations.append(inputs[step])
-                        current_plan.update({plans_decoded[step]})
+                        current_plan.add(plans_decoded[step])
                     elif not diff_plan:
                         
                         observations.append(responses[step])
-                        current_plan.update({plans_decoded[step]})
+                        current_plan.add(plans_decoded[step])
 
                     
                     turns_to_judge -= 1
@@ -100,28 +101,18 @@ class BridgeRewardManager:
                             "observations": observations,
                             "plans": set(current_plan).pop(),
                         }
-                        # history_text = " \n\n\n___________________________________________\n NEXT OBSERVATION:".join(observations)
-                        # print(f"""Plan to evaluate:{plans_decoded[step]} 
                         
-                        # for observations  
-                        
-                        # {history_text}
-                        
-                        # """)
-                        # history_plan = " \n\n\n___________________________________________\n NEXT PLAN:".join(current_plan)
-                        # print(f"[BridgeManager] The plans that are being sent to judge: {history_plan}")
-
                         turns_to_judge=self.judge_freq
                         payloads.append(payload)
                         batch_indices.append(step)
                         current_plan=set()
                         observations=[]
-                        diff_plan=False
+                        
                         if diff_plan:
                             observations.append(inputs[step])
                             current_plan.update({plans_decoded[step]})
-                            diff_plan=False
-                    
+                            
+                        diff_plan=False
                         
             
 
@@ -129,15 +120,18 @@ class BridgeRewardManager:
                 
                 futures = self.brain.evaluate_reward.remote(payloads)
                 scores_list = ray.get(futures)
-                print(f"[BridgeManager] LLM Scores received: {mean(scores_list)}")
+                scores_np = np.array(scores_list)
+                plan_completion_rate = scores_np.mean()
+
+                weights = np.ones(16) / 16
+                moving_ave = np.convolve(scores_np, weights, mode='valid')
+                plan_completion = {'judge/plan_completion': plan_completion_rate,
+                                   'judge/plan_completion_moving_ave': moving_ave}
                 for idx, score in zip(batch_indices, scores_list):
                     llm_scores_flat[idx] = score
                 #llm_scores = torch.tensor(scores_list, device=device, dtype=torch.float32)
                 # print(f"[BridgeManager] LLM Scores computed.")
                 # print(f"[BridgeManager] LLM Scores Tensor: {llm_scores}")
-                # Logowanie kilku przykładów dla pewności
-                if self.step_counter % 10 == 0:
-                    print(f"[BridgeManager] Sample LLM Scores: {scores_list[:3]}")
                     
             except Exception as e:
                 print(f"[BridgeManager] Error calculating LLM reward: {e}")
@@ -145,23 +139,16 @@ class BridgeRewardManager:
 
         total_scores = env_rewards + llm_scores_flat
 
-        
-        
-        
+
         responses = data.batch['responses']
         prompt_length = data.batch['attention_mask'].shape[-1] - data.batch['responses'].shape[-1]
-        
-        # Maska uwagi dla całej sekwencji [Batch, Prompt+Resp]
         attention_mask = data.batch['attention_mask']
-        
-        # Wyciągamy maskę tylko dla części odpowiedzi
         response_mask = attention_mask[:, prompt_length:]
         
-        # Sumujemy maskę, żeby wiedzieć gdzie jest koniec zdania
         valid_response_lengths = response_mask.sum(dim=1)
 
         for i in range(batch_size):
-            # Indeks ostatniego tokenu
+
             last_token_idx = int(valid_response_lengths[i].item()) - 1
             if last_token_idx < 0: 
                 last_token_idx = 0
@@ -174,4 +161,5 @@ class BridgeRewardManager:
                 "reward_extra_info": defaultdict(list, {"llm_score": llm_scores_flat.tolist(), "env_score": env_rewards.tolist()}) 
             }
         else:
-            return reward_tensor
+            
+            return plan_completion,reward_tensor

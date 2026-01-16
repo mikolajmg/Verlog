@@ -33,7 +33,7 @@ export WANDB_ENTITY="ideas-ncbr"
 export WANDB_MODE="offline"
 model=Qwen/Qwen2.5-1.5B-Instruct #Mohxx/helios-1.5B-sft # Qwen/Qwen2.5-1.5B-Instruct
 micro_batch_size=16
-
+experiment_name="train_crafter_with_plan_and_judge_1.5B_3"
 #export DISABLE_FLASH_ATTN=1
 #reward_model.strategy="bridge" \
 #CUDA_LAUNCH_BLOCKING=1
@@ -65,7 +65,7 @@ PYTHONUNBUFFERED=1  python3 -m verl.trainer.main_ppo \
  envs.captioner.max_text_history=1 \
  envs.captioner.max_cot_history=1 \
  trainer.project_name="plan-crl" \
- trainer.experiment_name="train_crafter_with_plan_and_judge_1.5B_2" \
+ trainer.experiment_name=$experiment_name \
  trainer.val_before_train=True \
  trainer.critic_warmup=20 \
  trainer.critic_warmup_step=20 \

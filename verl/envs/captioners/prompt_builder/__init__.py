@@ -28,8 +28,6 @@ def create_prompt_builder(config, support_model):
         max_text_history = config.max_text_history
     max_planner_history =0
     
-    print(f"Support model config: {support_model}")
-    print("is planner enabled: ",support_model.planner.enable)
     if support_model.enable and support_model.planner.enable:
         max_planner_history = support_model.planner.get("max_history", 16)
 

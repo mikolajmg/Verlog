@@ -2,7 +2,15 @@ import ray
 from vllm import LLM, SamplingParams, TokensPrompt
 import re
 import time
-
+from openai_harmony import (
+    HarmonyEncodingName,
+    load_harmony_encoding,
+    Conversation,
+    Message,
+    Role,
+    SystemContent,
+    DeveloperContent
+)
 
 @ray.remote(num_gpus=1)
 class SupportedModelWorker:
@@ -61,11 +69,14 @@ class SupportedModelWorker:
 
         COT_START_MARKER = "What will you do next?"
         PLAN_INSTRUCTION = f"""
-Review your previous observations and current situation, then create a focused plan what to do next.
-Your plan must identify the immediate goal and what would be the outcome.
-Output in exactly this format:
-<plan>Your plan here</plan>
-"""
+        Review your previous observations and current situation, then create a focused plan what to do next.
+        Your plan must identify the immediate goal and what would be the outcome.
+        Output in exactly this format and nothing else:
+        <plan>
+        <Goal>Your immidiate goal</Goal>
+        <outcome>Your outcome here</outcome>
+        </plan>
+        """
 
         modified_chats = []
         for chat in observation_prompts:
@@ -90,7 +101,7 @@ Output in exactly this format:
         sampling_params = SamplingParams(
             temperature=0.7,
             top_p=0.9,
-            max_tokens = 160000,
+            max_tokens = 250000,
             
         )
         
@@ -127,7 +138,7 @@ Output in exactly this format:
 
         sampling_params = SamplingParams(
             temperature=0.0,
-            max_tokens=15000, 
+            max_tokens=25000, 
             stop=["###", "\n\n\n"] 
         )
 
