@@ -225,7 +225,7 @@ trainer:
   project_name: verl_examples
   experiment_name: gsm8k
   logger: [ 'console', 'wandb' ]
-  log_val_generations: 1 # log one msg per validation step
+  log_val_generations: 6 # log one msg per validation step
   nnodes: 1
   n_gpus_per_node: 8
   n_cpus_per_node: 4

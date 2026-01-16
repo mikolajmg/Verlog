@@ -81,7 +81,13 @@ class VecEnv:
         for remote in self.remotes:
             remote.send(('close', None))
  
-
+    def get_stats(self):
+        for remote in self.remotes:
+            remote.send(('get_stats', None))
+        
+        env_results = [remote.recv() for remote in self.remotes]
+                    
+        return env_results
     
 def worker(rank, remote, parent_remote, env_name, env_fn_wrapper, captioner_fn_wrapper):
     
@@ -127,6 +133,8 @@ def worker(rank, remote, parent_remote, env_name, env_fn_wrapper, captioner_fn_w
             remote.send((obs,plan_obs, info))
         elif cmd == 'render':
             remote.send(image)
+        elif cmd == 'get_stats':
+            remote.send(env.get_stats())
         elif cmd == 'close':
             env.close()
             remote.close()

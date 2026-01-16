@@ -534,15 +534,14 @@ class RayPPOTrainer(object):
 
         # Create tuples of (input, output, score) and sort by input text
         samples = list(zip(inputs, outputs, scores))
-        samples.sort(key=lambda x: x[0])  # Sort by input text
+        #samples.sort(key=lambda x: x[0])  # Sort by input text
 
         # Use fixed random seed for deterministic shuffling
-        rng = np.random.RandomState(42)
-        rng.shuffle(samples)
+        #rng = np.random.RandomState(42)
+        #rng.shuffle(samples)
 
         # Take first N samples after shuffling
-        samples = samples[:generations_to_log]
-
+        samples = samples[::self.config.envs.n_rollouts]
         # Log to each configured logger
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
@@ -563,6 +562,9 @@ class RayPPOTrainer(object):
         rew_of_traj = 0.
         len_of_traj = 0.
         counter=0
+
+        n_rollouts = self.config.envs.n_rollouts
+        achievements = [defaultdict(list) for _ in range(n_rollouts)]
         while True:
             if self.config.support_model.enable and self.config.support_model.planner.enable:
                 frequency = self.config.support_model.planner.frequency
@@ -571,8 +573,8 @@ class RayPPOTrainer(object):
                     _, plans = ray.get(futures)
                     cached_plans = plans
 
-                
                 val_obs = [o + p for o, p in zip(val_obs, cached_plans)]
+
             self.tokenizer.padding_side = "left"
             val_input_obs_text = self.tokenizer.apply_chat_template(val_obs, tokenize=False, add_generation_prompt=True) #, enable_thinking=True)
             sample_inputs.extend(val_input_obs_text)
@@ -598,16 +600,22 @@ class RayPPOTrainer(object):
             sample_outputs.extend(actions)
             
             val_obs,val_plan_obs, val_reward, val_terminated, val_truncated, val_info = self.val_env.step(actions)
+            stats = self.val_env.get_stats()
             if end_of_traj is None:
                 end_of_traj = np.logical_or(val_terminated, val_truncated)
                 rew_of_traj = val_reward
                 len_of_traj = np.ones_like(val_reward)
+                
             else:
                 done = np.logical_or(val_terminated, val_truncated)
                 rew_of_traj += val_reward * (~end_of_traj).astype(np.float32)
                 len_of_traj += (~end_of_traj).astype(np.float32)
                 end_of_traj = np.logical_or(end_of_traj, done)
-            
+                
+            for i in range(n_rollouts): 
+                if not  end_of_traj[i]:
+                    achievements[i] = stats[i]
+
             sample_scores.extend(rew_of_traj)
             counter+=1
             if end_of_traj.all():
@@ -623,6 +631,19 @@ class RayPPOTrainer(object):
             "val-traj_length": len_of_traj.mean(),
         }
 
+        aggregated_stats = {}
+        if achievements:
+            all_keys = achievements[0].keys()
+            
+            for k in all_keys:
+                values = [res[k] for res in achievements]
+                aggregated_stats[k] = values
+
+            
+        metric_dict.update({
+            f"env/{k}": np.array(v).mean()
+            for k, v in aggregated_stats.items() 
+        })
         return metric_dict
 
     def init_workers(self):
@@ -853,7 +874,7 @@ class RayPPOTrainer(object):
         # currently, we only support validation using the reward_function.
         if self.val_reward_fn is not None and self.config.trainer.get('val_before_train', True):
             val_metrics = self._validate()
-            pprint(f'Initial validation metrics: {val_metrics}')
+            
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get('val_only', False):
                 return
@@ -903,7 +924,6 @@ class RayPPOTrainer(object):
                 actions = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
                 
                 obs, plan_obs, reward, terminated, truncated, info = self.env.step(actions)
-                print("INFO rewards: ", info)
                 images = self.env.render()
                 for i in range(len(images)):
                     if not episode_done[i]:
@@ -1124,7 +1144,8 @@ class RayPPOTrainer(object):
 
                         if self.config.support_model.judge.enable and self.config.reward_model.reward_manager == 'bridge':
                         
-                            batch.batch['token_level_rewards'] = self.reward_fn(batch)
+                            plan_completion,batch.batch['token_level_rewards'] = self.reward_fn(batch)
+                            metrics.update(plan_completion)
                             total_rewards = batch.batch['token_level_rewards'][indices, seq_len]
                             batch.batch['reward'] = total_rewards
 

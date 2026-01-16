@@ -199,34 +199,24 @@ class ValidationGenerationsLogger:
             print(f"Input: {sample[0]}")
             print(f"Output: {sample[1]}")
             print(f"Score: {sample[2]}")
+            break # we will only print the first sample to console
         print(f"{'='*60}\n")
 
     def log_generations_to_wandb(self, samples, step):
         """Log samples to wandb as a table"""
         import wandb
+        columns = ["Step", "Input", "Output", "Score"]
 
-        # Create column names for all samples
-        columns = ["step"] + sum([[f"input_{i+1}", f"output_{i+1}", f"score_{i+1}"] for i in range(len(samples))], [])
-
-        if not hasattr(self, 'validation_table'):
-            # Initialize the table on first call
-            self.validation_table = wandb.Table(columns=columns)
-
-        # Create a new table with same columns and existing data
-        # Workaround for https://github.com/wandb/wandb/issues/2981#issuecomment-1997445737
-        new_table = wandb.Table(columns=columns, data=self.validation_table.data)
-
-        # Add new row with all data
-        row_data = []
-        row_data.append(step)
+        table_data = []
         for sample in samples:
-            row_data.extend(sample)
+            row = [step, sample[0], sample[1], sample[2]]
+            table_data.append(row)
 
-        new_table.add_data(*row_data)
+        table = wandb.Table(columns=columns, data=table_data)
+        wandb.log({"val/generations": table}, step=step)
 
-        # Update reference and log
-        wandb.log({"val/generations": new_table}, step=step)
-        self.validation_table = new_table
+
+        
 
     def log_generations_to_swanlab(self, samples, step):
         """Log samples to swanlab as text"""

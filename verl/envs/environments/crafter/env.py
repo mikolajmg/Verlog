@@ -251,8 +251,10 @@ class CrafterLanguageWrapper(gym.Wrapper):
         return self.score_tracker
 
     def get_stats(self):
-        return {
-            "score": self.score_tracker,
-            "progression": float(self.score_tracker) / 22.0,
-            "achievements": self.achievements,
-        }
+        stats = {"score": self.score_tracker,
+                    "progression": float(self.score_tracker) / 22.0,}
+        if self.achievements:
+            stats.update({f"achievement_{k}": v for k, v in self.achievements.items()})
+        
+
+        return stats

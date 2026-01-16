@@ -3,8 +3,8 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
-#SBATCH --time=01:29:58
-#SBATCH --gres=gpu:2
+#SBATCH --time=00:29:58
+#SBATCH --gres=gpu:3
 #SBATCH --account=plgbro4ppo-gpu-gh200
 #SBATCH --partition=plgrid-gpu-gh200
 #SBATCH --output=slurm/slurm-%j.out
@@ -25,7 +25,7 @@ export HYDRA_FULL_ERROR=1
 #pip install unsloth
 python3 -c "import torch; print(f'Torch: {torch.__version__}'); import flash_attn; print('Flash Attention load success!')"
 #pip install flashinfer-python
-
+pip install openai-harmony
 pip list
 
 set -e
@@ -66,13 +66,13 @@ PYTHONUNBUFFERED=1  python3 -m verl.trainer.main_ppo \
  envs.captioner.max_cot_history=1 \
  trainer.project_name="plan-crl" \
  trainer.experiment_name="experiment" \
- trainer.val_before_train=False \
- trainer.critic_warmup=20 \
- trainer.critic_warmup_step=20 \
+ trainer.val_before_train=True \
+ trainer.critic_warmup=1 \
+ trainer.critic_warmup_step=1 \
  trainer.n_gpus_per_node=$SLURM_GPUS_ON_NODE \
  trainer.n_cpus_per_node=28 \
  trainer.nnodes=1 \
- trainer.logger=["console"]\
+ trainer.logger=["console","wandb"]\
  trainer.save_freq=50 \
  trainer.test_freq=5 \
  trainer.render=False \
