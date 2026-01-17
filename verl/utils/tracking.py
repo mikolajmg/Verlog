@@ -38,6 +38,8 @@ class Tracking(object):
 
         if 'tracking' in default_backend or 'wandb' in default_backend:
             import wandb
+            from wandb_osh.hooks import TriggerWandbSyncHook
+            self.trigger_sync = TriggerWandbSyncHook()
             wandb.init(project=project_name, name=experiment_name, config=config)
             self.logger['wandb'] = wandb
 
@@ -105,6 +107,8 @@ class Tracking(object):
         for default_backend, logger_instance in self.logger.items():
             if backend is None or default_backend in backend:
                 logger_instance.log(data=data, step=step)
+        if self.trigger_sync:
+            self.trigger_sync()
 
     def __del__(self):
         if 'wandb' in self.logger:
@@ -213,7 +217,7 @@ class ValidationGenerationsLogger:
             table_data.append(row)
 
         table = wandb.Table(columns=columns, data=table_data)
-        wandb.log({"val/generations": table}, step=step)
+        wandb.log({f"val/generations_{str(step)}": table}, step=step)
 
 
         

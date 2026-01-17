@@ -541,7 +541,7 @@ class RayPPOTrainer(object):
         #rng.shuffle(samples)
 
         # Take first N samples after shuffling
-        samples = samples[::self.config.envs.n_rollouts]
+        #samples = samples[::self.config.envs.n_rollouts]
         # Log to each configured logger
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
@@ -577,7 +577,8 @@ class RayPPOTrainer(object):
 
             self.tokenizer.padding_side = "left"
             val_input_obs_text = self.tokenizer.apply_chat_template(val_obs, tokenize=False, add_generation_prompt=True) #, enable_thinking=True)
-            sample_inputs.extend(val_input_obs_text)
+                
+
             val_input_obs = self.tokenizer(val_input_obs_text, return_tensors='pt', padding='max_length', truncation=True, max_length=max_seq_len)
             input_ids = val_input_obs['input_ids']
             attention_mask = val_input_obs['attention_mask']
@@ -597,7 +598,7 @@ class RayPPOTrainer(object):
                         
             response_ids = val_gen_batch_output.batch['responses']
             actions = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
-            sample_outputs.extend(actions)
+                
             
             val_obs,val_plan_obs, val_reward, val_terminated, val_truncated, val_info = self.val_env.step(actions)
             stats = self.val_env.get_stats()
@@ -615,8 +616,10 @@ class RayPPOTrainer(object):
             for i in range(n_rollouts): 
                 if not  end_of_traj[i]:
                     achievements[i] = stats[i]
-
-            sample_scores.extend(rew_of_traj)
+            if not end_of_traj[0]:
+                sample_inputs.extend([val_input_obs_text[0]])
+                sample_outputs.extend([actions[0]])
+                sample_scores.extend([rew_of_traj[0]])
             counter+=1
             if end_of_traj.all():
                 break
