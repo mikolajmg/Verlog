@@ -10,9 +10,9 @@ contexts:
       - Python/3.11.5
       - CUDA/12.8.0
       - SQLite/3.43.1
-    cpu: 16
-    mem: 128G
-    gpu: 1
+    cpu: 32
+    mem: 256G
+    gpu: 2
     nodes: 1
     ntasks: 1
     partition: plgrid-gpu-gh200

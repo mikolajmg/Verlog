@@ -10,15 +10,14 @@ name = globals()["script"][:-3]
 scratch = "/net/scratch/hscra/plgrid/plgmikolajg"
 
 # params for all exps
-model_name = "Mohxx/helios-1.5B-sft" # or "Qwen/Qwen2.5-1.5B-Instruct"
-micro_batch_size = 16
+model_name = "Qwen/Qwen2.5-1.5B-Instruct" # or "Qwen/Qwen2.5-1.5B-Instruct"
+micro_batch_size = 32
 
 config = {
     # --- DATA & BATCH SIZES ---
     "entry_point": "verl.trainer.main_ppo",
     "data.max_prompt_length": 3000,
     "data.max_response_length": 512,
-    "data.train_batch_size": 512,
     "actor_rollout_ref.actor.ppo_mini_batch_size": 128,
     
     # Micro batch sizes (Used in 4 places in your sbatch script)
@@ -34,8 +33,8 @@ config = {
     # --- INFRASTRUCTURE ---
     "actor_rollout_ref.rollout.tensor_model_parallel_size": 1,
     "actor_rollout_ref.rollout.gpu_memory_utilization": 0.7,
-    "trainer.n_gpus_per_node": 1,      # Matching your mrunner gpu:1 setting
-    "trainer.n_cpus_per_node": 16,     # Matching your mrunner cpu:16 setting
+    "trainer.n_gpus_per_node": 2,     
+    "trainer.n_cpus_per_node": 28,     
     "trainer.nnodes": 1,
     
     # --- ALGORITHM ---
@@ -49,7 +48,7 @@ config = {
     "critic.highlight_ratio": 3.0,
 
     # --- ENVIRONMENT ---
-    "envs.n_rollouts": 16,
+    "envs.n_rollouts": 32,
     "envs.env_name": "crafter",
     "envs.task": "default",
     "envs.format_penalty": 0.1,
@@ -81,7 +80,7 @@ config = {
 # Grid search parameters
 params_grid = [
     {
-        "seed": [0],
+        "data.train_batch_size": [512,1024,2048],
         # Example: you can sweep over batch sizes or KL coeffs here
         # "train_batch_size": [256, 512],
     },
