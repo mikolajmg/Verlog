@@ -1,5 +1,5 @@
 contexts:
-  helios_gpu:
+  helios_gpu4:
     account: plgbro4ppo-gpu-gh200
     backend_type: slurm
     cmd_type: sbatch
@@ -12,14 +12,39 @@ contexts:
       - SQLite/3.43.1
     cpu: 32
     mem: 256G
-    gpu: 2
+    gpu: 4
     nodes: 1
     ntasks: 1
     partition: plgrid-gpu-gh200
     venv: /net/scratch/hscra/plgrid/plgmikolajg/Verlog/.venv4
     slurm_url: helios
     storage_dir: /net/scratch/hscra/plgrid/plgmikolajg
-    time: 2880
+    time: 550
+
+
+    
+  contexts:
+  helios_gpu3:
+    account: plgbro4ppo-gpu-gh200
+    backend_type: slurm
+    cmd_type: sbatch
+    sbatch_options:
+      - "--export=NONE"
+    modules_to_load:
+      - ML-bundle/24.06a
+      - Python/3.11.5
+      - CUDA/12.8.0
+      - SQLite/3.43.1
+    cpu: 32
+    mem: 256G
+    gpu: 3
+    nodes: 1
+    ntasks: 1
+    partition: plgrid-gpu-gh200
+    venv: /net/scratch/hscra/plgrid/plgmikolajg/Verlog/.venv4
+    slurm_url: helios
+    storage_dir: /net/scratch/hscra/plgrid/plgmikolajg
+    time: 550
 
   Other_context:
     account: plgbro4ppo
@@ -27,7 +52,7 @@ contexts:
     cmd_type: sbatch
     modules_to_load:
       
-    cpu: 16
+    cpu: 32
     mem: 64G
     gpu: 0
     nodes: 1

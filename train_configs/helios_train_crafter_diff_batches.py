@@ -11,7 +11,7 @@ scratch = "/net/scratch/hscra/plgrid/plgmikolajg"
 
 # params for all exps
 model_name = "Qwen/Qwen2.5-1.5B-Instruct" # or "Qwen/Qwen2.5-1.5B-Instruct"
-micro_batch_size = 32
+micro_batch_size = 16
 
 config = {
     # --- DATA & BATCH SIZES ---
@@ -32,8 +32,8 @@ config = {
 
     # --- INFRASTRUCTURE ---
     "actor_rollout_ref.rollout.tensor_model_parallel_size": 1,
-    "actor_rollout_ref.rollout.gpu_memory_utilization": 0.7,
-    "trainer.n_gpus_per_node": 2,     
+    "actor_rollout_ref.rollout.gpu_memory_utilization": 0.6,
+    "trainer.n_gpus_per_node": 4,     
     "trainer.n_cpus_per_node": 28,     
     "trainer.nnodes": 1,
     
@@ -48,7 +48,7 @@ config = {
     "critic.highlight_ratio": 3.0,
 
     # --- ENVIRONMENT ---
-    "envs.n_rollouts": 32,
+    "envs.n_rollouts": 16,
     "envs.env_name": "crafter",
     "envs.task": "default",
     "envs.format_penalty": 0.1,
@@ -62,9 +62,9 @@ config = {
     "trainer.experiment_name": name,
     "trainer.val_before_train": True,
     "trainer.critic_warmup": 20,
-    "trainer.critic_warmup_step": 20,
+    "trainer.critic_warmup_step": 5,
     "trainer.logger": ["console", "wandb"],
-    "trainer.save_freq": 20,
+    "trainer.save_freq": 5,
     "trainer.test_freq": 5,
     "trainer.render": False,
     "trainer.total_epochs": 100,
@@ -80,7 +80,7 @@ config = {
 # Grid search parameters
 params_grid = [
     {
-        "data.train_batch_size": [512,1024,2048],
+        "data.train_batch_size": [512,1024,2048,4096],
         # Example: you can sweep over batch sizes or KL coeffs here
         # "train_batch_size": [256, 512],
     },
