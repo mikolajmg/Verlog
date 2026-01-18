@@ -149,7 +149,7 @@ class SupportedModelWorker:
         for i, output in enumerate(outputs):
             prompt_text = formatted_prompts[i]
             response_text = output.outputs[0].text.strip()
-            score = self._parse_score(response_text) * self.config.support_model.judge.reward_scale
+            score = self._parse_score(response_text) 
             
             
             

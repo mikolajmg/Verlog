@@ -122,11 +122,9 @@ class BridgeRewardManager:
                 scores_list = ray.get(futures)
                 scores_np = np.array(scores_list)
                 plan_completion_rate = scores_np.mean()
-
-                weights = np.ones(16) / 16
-                moving_ave = np.convolve(scores_np, weights, mode='valid')
-                plan_completion = {'judge/plan_completion': plan_completion_rate,
-                                   'judge/plan_completion_moving_ave': moving_ave}
+                if self.config:
+                    scores_list  = [s* self.config.support_model.judge.reward_scale for s in scores_list]
+                plan_completion = {'judge/plan_completion': plan_completion_rate}
                 for idx, score in zip(batch_indices, scores_list):
                     llm_scores_flat[idx] = score
                 #llm_scores = torch.tensor(scores_list, device=device, dtype=torch.float32)

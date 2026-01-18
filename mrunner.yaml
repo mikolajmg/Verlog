@@ -19,7 +19,7 @@ contexts:
     venv: /net/scratch/hscra/plgrid/plgmikolajg/Verlog/.venv4
     slurm_url: helios
     storage_dir: /net/scratch/hscra/plgrid/plgmikolajg
-    time: 550
+    time: 600
 
 
     
