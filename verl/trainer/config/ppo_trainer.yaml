@@ -200,6 +200,7 @@ support_model:
   judge:
     enable: False
     num_examine: 5
+    reward_scale: 1.0
 custom_reward_function:
   path: null
   name: compute_score

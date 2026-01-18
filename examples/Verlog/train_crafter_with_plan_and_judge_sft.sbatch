@@ -75,6 +75,7 @@ PYTHONUNBUFFERED=1  python3 -m verl.trainer.main_ppo \
  trainer.save_freq=20 \
  trainer.test_freq=5 \
  trainer.render=False \
+ support_model.judge.reward_scale=1.0 \
  support_model.judge.enable=True \
  support_model.enable=True \
  reward_model.enable=True \

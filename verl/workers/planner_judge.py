@@ -149,7 +149,7 @@ class SupportedModelWorker:
         for i, output in enumerate(outputs):
             prompt_text = formatted_prompts[i]
             response_text = output.outputs[0].text.strip()
-            score = self._parse_score(response_text)
+            score = self._parse_score(response_text) * self.config.support_model.judge.reward_scale
             
             
             
@@ -204,11 +204,11 @@ The plan logic is sound and follows the previous observation because agent gathe
     def _parse_score(self, text: str) -> float:
         try:
             text = text.upper().strip()
-            if "[[GOOD]]" in text: return 1.0
+            if "[[GOOD]]" in text: return 1.0 
             if "[[BAD]]" in text:  return 0.0
             
             last_line = text.split('\n')[-1]
-            if re.search(r'\bGOOD\b', last_line): return 1.0
+            if re.search(r'\bGOOD\b', last_line): return 1.0 
             if re.search(r'\bBAD\b', last_line):  return 0.0
             
             return 0.0
